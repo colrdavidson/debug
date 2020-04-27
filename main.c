@@ -5,6 +5,38 @@
 #include <sys/ptrace.h>
 #include <sys/user.h>
 
+uint64_t inject_breakpoint_at_addr(int pid, uint64_t addr) {
+	uint64_t orig_data = ptrace(PTRACE_PEEKTEXT, pid, (void *)addr, NULL);
+
+	// Replace first byte of instruction stream with int 3
+	uint64_t data_with_trap = (orig_data & 0xFFFFFFFFFFFF00) | 0xCC;
+	ptrace(PTRACE_POKETEXT, pid, (void *)addr, (void *)data_with_trap);
+
+	return orig_data;
+}
+
+void repair_breakpoint(int pid, uint64_t addr, uint64_t orig_data) {
+	struct user_regs_struct regs;
+	ptrace(PTRACE_GETREGS, pid, 0, &regs);
+
+	ptrace(PTRACE_POKETEXT, pid, (void *)addr, (void *)orig_data);
+	regs.rip -= 1;
+	ptrace(PTRACE_SETREGS, pid, NULL, &regs);
+}
+
+int jump_to_next_breakpoint(int pid) {
+	ptrace(PTRACE_CONT, pid, NULL, NULL);
+
+	int status;
+	wait(&status);
+	if (!WIFSTOPPED(status)) {
+		printf("Failure to break on breakpoint\n");
+		return -1;
+	}
+
+	return 0;
+}
+
 int main(int argc, char **argv) {
 	int pid = fork();
 	if (pid == 0) {
@@ -13,18 +45,18 @@ int main(int argc, char **argv) {
 		return -1;
 	}
 
-	uint64_t instruction_count = 0;
+	int status;
+	wait(&status);
+
+	struct user_regs_struct regs;
+	ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+	printf("RIP: %llx\n", regs.rip);
+	uint64_t break_addr = regs.rip + 3;
+
+	uint64_t orig_data = inject_breakpoint_at_addr(pid, break_addr);
+
 	for (;;) {
-		int status;
-		wait(&status);
-		if (WIFEXITED(status)) {
-			return 1;
-		}
-
-		struct user_regs_struct regs;
-
 		ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-		printf("Instruction Count: %lu\n", instruction_count);
 		printf("RIP: %llx\n", regs.rip);
 		printf("RAX: %llx\n", regs.rax);
 		printf("RBX: %llx\n", regs.rbx);
@@ -44,11 +76,26 @@ int main(int argc, char **argv) {
 		printf("R15: %llx\n", regs.r15);
 		printf("\n");
 
-		ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
-		instruction_count++;
+		if (regs.rip == break_addr) {
+			printf("Hopping over breakpoint\n");
+			repair_breakpoint(pid, break_addr, orig_data);
+			ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
+			orig_data = inject_breakpoint_at_addr(pid, break_addr);
+			printf("Breakpoint restored\n");
+		} else {
+			ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
+		}
 
 		usleep(500000);
+
+		wait(&status);
+		if (WIFEXITED(status)) {
+			return 0;
+		}
 	}
+
+	repair_breakpoint(pid, break_addr, orig_data);
+	ptrace(PTRACE_CONT, pid, NULL, NULL);
 
 	return 0;
 }
