@@ -1,6 +1,7 @@
 #include <stdio.h>
-#include <unistd.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <unistd.h>
 #include <sys/wait.h>
 #include <sys/ptrace.h>
 #include <sys/user.h>
@@ -8,7 +9,7 @@
 uint64_t inject_breakpoint_at_addr(int pid, uint64_t addr) {
 	uint64_t orig_data = ptrace(PTRACE_PEEKTEXT, pid, (void *)addr, NULL);
 
-	// Replace first byte of instruction stream with int 3
+	// Replace first byte of code at address with int 3
 	uint64_t data_with_trap = (orig_data & 0xFFFFFFFFFFFF00) | 0xCC;
 	ptrace(PTRACE_POKETEXT, pid, (void *)addr, (void *)data_with_trap);
 
@@ -31,7 +32,7 @@ int jump_to_next_breakpoint(int pid) {
 	wait(&status);
 	if (!WIFSTOPPED(status)) {
 		printf("Failure to break on breakpoint\n");
-		return -1;
+		exit(1);
 	}
 
 	return 0;
