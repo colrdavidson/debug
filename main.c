@@ -4,6 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <sys/wait.h>
 #include <sys/ptrace.h>
 #include <sys/user.h>
@@ -81,15 +82,46 @@ static int jump_to_next_breakpoint(int pid) {
 	return 0;
 }
 
+int open_binary(char *name, char **prog_path) {
+	int fd;
+
+	fd = open(name, O_RDONLY);
+	if (fd < 0) {
+		close(fd);
+
+		char *path = getenv("PATH");
+
+		char *tmp = NULL;
+		do {
+			tmp = strchr(path, ':');
+			if (tmp != NULL) {
+				tmp[0] = 0;
+			}
+
+			uint64_t path_len = snprintf(*prog_path, PATH_MAX, "%s/%s", path, name);
+			fd = open(*prog_path, O_RDONLY);
+			if (fd >= 0) {
+				return fd;
+			}
+
+			close(fd);
+
+			memset(*prog_path, 0, path_len);
+			path = tmp + 1;
+		} while (tmp != NULL);
+	}
+
+	return -1;
+}
+
 int main(int argc, char **argv) {
 	if (argc < 2) {
 		panic("Please provide the debugger a program to debug!\n");
 	}
 
-	int fd = open(argv[1], O_RDONLY);
-	if (!fd) {
-		panic("Failed to open %s\n", argv[1]);
-	}
+	char *bin_name = calloc(1, PATH_MAX);
+	int fd = open_binary(argv[1], &bin_name);
+	printf("Debugging %s\n", bin_name);
 
 	off_t f_end = lseek(fd, 0, SEEK_END);
 	if (f_end < 0) {
@@ -101,7 +133,7 @@ int main(int argc, char **argv) {
 	uint8_t *buffer = malloc(size);
 	ssize_t ret = read(fd, buffer, size);
 	if (ret < 0 || (uint64_t)ret != size) {
-		panic("Failed to read %s\n", argv[1]);
+		panic("Failed to read %s\n", bin_name);
 	}
 
 	// Ensure that the file is an executable program
@@ -161,6 +193,7 @@ int main(int argc, char **argv) {
 			printf("- Section Type:       %u\n",  sect_hdr->sh_type);
 			printf("- Section Size:       %lx\n", sect_hdr->sh_size);
 			printf("- Section Entry Size: %lx\n", sect_hdr->sh_entsize);
+
 			break;
 		}
 	}
@@ -169,9 +202,9 @@ int main(int argc, char **argv) {
 	int pid = fork();
 	if (pid == 0) {
 		ptrace(PTRACE_TRACEME, 0, NULL, NULL);
-		execvp(argv[1], argv + 1);
+		execvp(bin_name, argv + 1);
 
-		panic("Failed to run program %s\n", argv[1]);
+		panic("Failed to run program %s\n", bin_name);
 	} else if (pid < 0) {
 		panic("Failed to fork?\n");
 	}
