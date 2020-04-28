@@ -55,19 +55,14 @@ static uint64_t inject_breakpoint_at_addr(int pid, uint64_t addr) {
 	uint64_t orig_data = (uint64_t)ptrace(PTRACE_PEEKTEXT, pid, (void *)addr, NULL);
 
 	// Replace first byte of code at address with int 3
-	uint64_t data_with_trap = (orig_data & 0xFFFFFFFFFFFF00) | 0xCC;
+	uint64_t data_with_trap = (orig_data & (~0xFF)) | 0xCC;
 	ptrace(PTRACE_POKETEXT, pid, (void *)addr, (void *)data_with_trap);
 
 	return orig_data;
 }
 
 static void repair_breakpoint(int pid, uint64_t addr, uint64_t orig_data) {
-	struct user_regs_struct regs;
-	ptrace(PTRACE_GETREGS, pid, 0, &regs);
-
 	ptrace(PTRACE_POKETEXT, pid, (void *)addr, (void *)orig_data);
-	regs.rip -= 1;
-	ptrace(PTRACE_SETREGS, pid, NULL, &regs);
 }
 
 static int jump_to_next_breakpoint(int pid) {
@@ -86,30 +81,32 @@ int open_binary(char *name, char **prog_path) {
 	int fd;
 
 	fd = open(name, O_RDONLY);
-	if (fd < 0) {
+	if (fd >= 0) {
+		*prog_path = name;
+		return fd;
+
+	}
+	close(fd);
+
+	char *path = getenv("PATH");
+	char *tmp = NULL;
+	do {
+		tmp = strchr(path, ':');
+		if (tmp != NULL) {
+			tmp[0] = 0;
+		}
+
+		uint64_t path_len = snprintf(*prog_path, PATH_MAX, "%s/%s", path, name);
+		fd = open(*prog_path, O_RDONLY);
+		if (fd >= 0) {
+			return fd;
+		}
+
 		close(fd);
 
-		char *path = getenv("PATH");
-
-		char *tmp = NULL;
-		do {
-			tmp = strchr(path, ':');
-			if (tmp != NULL) {
-				tmp[0] = 0;
-			}
-
-			uint64_t path_len = snprintf(*prog_path, PATH_MAX, "%s/%s", path, name);
-			fd = open(*prog_path, O_RDONLY);
-			if (fd >= 0) {
-				return fd;
-			}
-
-			close(fd);
-
-			memset(*prog_path, 0, path_len);
-			path = tmp + 1;
-		} while (tmp != NULL);
-	}
+		memset(*prog_path, 0, path_len);
+		path = tmp + 1;
+	} while (tmp != NULL);
 
 	return -1;
 }
@@ -121,6 +118,10 @@ int main(int argc, char **argv) {
 
 	char *bin_name = calloc(1, PATH_MAX);
 	int fd = open_binary(argv[1], &bin_name);
+	if (fd < 0) {
+		panic("Failed to open program %s\n", argv[1]);
+	}
+
 	printf("Debugging %s\n", bin_name);
 
 	off_t f_end = lseek(fd, 0, SEEK_END);
@@ -135,6 +136,7 @@ int main(int argc, char **argv) {
 	if (ret < 0 || (uint64_t)ret != size) {
 		panic("Failed to read %s\n", bin_name);
 	}
+	close(fd);
 
 	// Ensure that the file is an executable program
 	Elf64_Ehdr *elf_hdr = (Elf64_Ehdr *)buffer;
@@ -214,13 +216,14 @@ int main(int argc, char **argv) {
 
 	struct user_regs_struct regs;
 	ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-	printf("RIP: %llx\n", regs.rip);
 	uint64_t break_addr = regs.rip + 3;
 
 	uint64_t orig_data = inject_breakpoint_at_addr(pid, break_addr);
 
 	for (;;) {
 		ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+		uint64_t cur_inst = ptrace(PTRACE_PEEKTEXT, pid, (void *)regs.rip, NULL);
+
 		printf("RIP: %llx\n", regs.rip);
 		printf("RAX: %llx\n", regs.rax);
 		printf("RBX: %llx\n", regs.rbx);
@@ -238,23 +241,32 @@ int main(int argc, char **argv) {
 		printf("R13: %llx\n", regs.r13);
 		printf("R14: %llx\n", regs.r14);
 		printf("R15: %llx\n", regs.r15);
-		printf("\n");
+		printf("Current Inst: 0x%lx\n", cur_inst);
 
 		if (regs.rip == break_addr) {
 			printf("Hopping over breakpoint\n");
+
 			repair_breakpoint(pid, break_addr, orig_data);
+
 			ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
+
+			wait(&status);
+			if (WIFEXITED(status)) {
+				return 0;
+			}
+
 			orig_data = inject_breakpoint_at_addr(pid, break_addr);
 			printf("Breakpoint restored\n");
 		} else {
 			ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
+
+			wait(&status);
+			if (WIFEXITED(status)) {
+				return 0;
+			}
 		}
 
+		printf("\n");
 		usleep(500000);
-
-		wait(&status);
-		if (WIFEXITED(status)) {
-			return 0;
-		}
 	}
 }
