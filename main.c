@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/wait.h>
@@ -25,6 +26,29 @@ typedef struct {
 	uint16_t e_shnum;
 	uint16_t e_shstrndx;
 } Elf64_Ehdr;
+
+typedef struct {
+	uint32_t sh_name;
+	uint32_t sh_type;
+	uint64_t sh_flags;
+	uint64_t sh_addr;
+	uint64_t sh_offset;
+	uint64_t sh_size;
+	uint32_t sh_link;
+	uint32_t sh_info;
+	uint64_t sh_addralign;
+	uint64_t sh_entsize;
+} ELF64_Shdr;
+
+enum {
+	SHT_NULL = 0,
+	SHT_PROGBITS,
+	SHT_SYMTAB,
+	SHT_STRTAB,
+	SHT_RELA,
+	SHT_HASH,
+	SHT_DYNAMIC
+};
 
 static uint64_t inject_breakpoint_at_addr(int pid, uint64_t addr) {
 	uint64_t orig_data = (uint64_t)ptrace(PTRACE_PEEKTEXT, pid, (void *)addr, NULL);
@@ -98,9 +122,47 @@ int main(int argc, char **argv) {
 		panic("This debugger only supports x86_64\n");
 	}
 
-	#define ET_EXEC     2
-	if (elf_hdr->e_type != ET_EXEC) {
+	#define ET_EXEC  2
+	#define ET_DYN   3
+	if (!(elf_hdr->e_type == ET_EXEC || elf_hdr->e_type == ET_DYN)) {
 		panic("This debugger only supports executable files\n");
+	}
+
+	if (!elf_hdr->e_shstrndx) {
+		panic("I'd like a string table please! TODO\n");
+	}
+
+	printf("ELF entry location:            %lu\n", elf_hdr->e_entry);
+	printf("ELF header size:               %d\n",  elf_hdr->e_ehsize);
+	printf("ELF program header entry size: %d\n",  elf_hdr->e_phentsize);
+	printf("ELF program header offset:     %lu\n", elf_hdr->e_phoff);
+	printf("ELF program header entries:    %d\n",  elf_hdr->e_phnum);
+	printf("ELF program header size:       %d\n",  elf_hdr->e_phentsize * elf_hdr->e_phnum);
+	printf("ELF section header entry size: %d\n",  elf_hdr->e_shentsize);
+	printf("ELF section header offset:     %lu\n", elf_hdr->e_shoff);
+	printf("ELF section header entries:    %d\n",  elf_hdr->e_shnum);
+	printf("ELF section header size:       %d\n",  elf_hdr->e_shentsize * elf_hdr->e_shnum);
+
+	uint8_t *sect_hdr_buf = buffer + elf_hdr->e_shoff;
+	ELF64_Shdr *strtable_hdr = (ELF64_Shdr *)(sect_hdr_buf + (elf_hdr->e_shstrndx * elf_hdr->e_shentsize));
+	if (strtable_hdr->sh_type != SHT_STRTAB) {
+		panic("Executable string table appears invalid!\n");
+	}
+
+	char *strtable = (char *)(buffer + strtable_hdr->sh_offset);
+	for (int i = 0; i < elf_hdr->e_shnum; i++) {
+		ELF64_Shdr *sect_hdr = (ELF64_Shdr *)(sect_hdr_buf + (i * elf_hdr->e_shentsize));
+
+		char *section_name = strtable + sect_hdr->sh_name;
+
+		char dbginfo_str[] = ".debug_info";
+		if (!(strncmp(section_name, dbginfo_str, sizeof(dbginfo_str)))) {
+			printf("- Section Name:       %s\n",  strtable + sect_hdr->sh_name);
+			printf("- Section Type:       %u\n",  sect_hdr->sh_type);
+			printf("- Section Size:       %lx\n", sect_hdr->sh_size);
+			printf("- Section Entry Size: %lx\n", sect_hdr->sh_entsize);
+			break;
+		}
 	}
 
 	// Attempt to debug program
