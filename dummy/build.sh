@@ -1,1 +1,1 @@
-clang -O0 -g -o dummy main.c
+clang -O0 -g -static -o dummy main.c

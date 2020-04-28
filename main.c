@@ -11,6 +11,7 @@
 
 #define panic(...) do { dprintf(2, __VA_ARGS__); exit(1); } while (0)
 
+#pragma pack(1)
 typedef struct {
 	uint8_t  e_ident[16];
 	uint16_t e_type;
@@ -40,6 +41,14 @@ typedef struct {
 	uint64_t sh_addralign;
 	uint64_t sh_entsize;
 } ELF64_Shdr;
+
+typedef struct {
+	uint32_t unit_length;
+	uint16_t version;
+	uint32_t debug_abbrev_offset;
+	uint8_t  address_size;
+} DWARF32_CUHdr;
+#pragma pack()
 
 enum {
 	SHT_NULL = 0,
@@ -195,6 +204,23 @@ int main(int argc, char **argv) {
 			printf("- Section Type:       %u\n",  sect_hdr->sh_type);
 			printf("- Section Size:       %lx\n", sect_hdr->sh_size);
 			printf("- Section Entry Size: %lx\n", sect_hdr->sh_entsize);
+			printf("- Section Offset:     %lx\n", sect_hdr->sh_offset);
+
+			uint8_t *dbg_info = buffer + sect_hdr->sh_offset;
+			if ((*(uint32_t *)dbg_info) == 0xFFFFFFFF) {
+				panic("Currently this debugger only handles a 32 bit DWARF .debug_info! TODO\n");
+			}
+
+			DWARF32_CUHdr *cu_hdr = (DWARF32_CUHdr *)(buffer + sect_hdr->sh_offset);
+
+			if (cu_hdr->version != 4) {
+				panic("This code only supports DWARF 4, got %d!\n", cu_hdr->version);
+			}
+
+			printf("debug_info useful size: %x\n", cu_hdr->unit_length);
+			printf("DWARF version: %d\n", cu_hdr->version);
+			printf("debug entry abbrev offset: %x\n", cu_hdr->debug_abbrev_offset);
+			printf("arch address size: %d bytes\n", cu_hdr->address_size);
 
 			break;
 		}
