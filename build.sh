@@ -1,1 +1,1 @@
-clang -O3 -Wall -Wextra -Wno-unused-function -o debugger main.c
+clang -O3 -g -Wall -Wextra -Wno-unused-function -o debugger main.c
