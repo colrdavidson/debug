@@ -9,6 +9,14 @@
 #include <sys/ptrace.h>
 #include <sys/user.h>
 
+/*
+ * Handy References:
+ * - https://refspecs.linuxbase.org/elf/elf.pdf
+ * - http://man7.org/linux/man-pages/man5/elf.5.html
+ * - http://dwarfstd.org/doc/DWARF4.pdf
+ * - https://wiki.osdev.org/DWARF
+ */
+
 #define panic(...) do { dprintf(2, __VA_ARGS__); exit(1); } while (0)
 
 #pragma pack(1)
@@ -50,6 +58,14 @@ typedef struct {
 } DWARF32_CUHdr;
 #pragma pack()
 
+typedef struct {
+	uint8_t  id;
+	uint32_t type;
+	uint8_t  has_children;
+	uint8_t *attr_buf;
+	int      attr_count;
+} AbbrevUnit;
+
 enum {
 	SHT_NULL = 0,
 	SHT_PROGBITS,
@@ -59,6 +75,34 @@ enum {
 	SHT_HASH,
 	SHT_DYNAMIC
 };
+
+typedef struct {
+	uint8_t *data;
+	size_t   off;
+	size_t   length;
+} dol_t;
+
+uint64_t get_leb128_u(dol_t *buf) {
+	uint64_t result = 0;
+	uint64_t shift = 0;
+
+	uint8_t low_mask = 0b01111111;
+	for (;;) {
+		if ((buf->data + buf->off + 1) > (buf->data + buf->length)) {
+			panic("Ran out of buffer space for leb128 building!\n");
+		}
+
+		uint8_t byte = buf->data[buf->off++];
+		result |= ((byte & low_mask) << shift);
+		if ((~low_mask) == 0) {
+			break;
+		}
+
+		shift += 7;
+	}
+
+	return result;
+}
 
 char *dwarf_tag_to_str(uint8_t id) {
 	switch (id) {
@@ -76,7 +120,12 @@ char *dwarf_tag_to_str(uint8_t id) {
 		case 0x2e: { return "DW_TAG_subprogram"; } break;
 		case 0x24: { return "DW_TAG_base_type"; } break;
 		case 0x34: { return "DW_TAG_variable"; } break;
-		default:   { return "(unknown)"; }
+		default:   {
+			if (id > 0x80) {
+				panic("TODO Error on tag (0x%x) We don't actually handle LEB128\n", id);
+			}
+			return "(unknown)";
+		}
 	}
 }
 
@@ -107,7 +156,12 @@ char *dwarf_attr_name_to_str(uint8_t attr_name) {
 		case 0x57: { return "DW_AT_call_column"; } break;
 		case 0x58: { return "DW_AT_call_file"; } break;
 		case 0x59: { return "DW_AT_call_line"; } break;
-		default:   { return "(unknown)"; }
+		default:   {
+			if (attr_name > 0x80) {
+				panic("TODO Error on attr_name (0x%x) We don't actually handle LEB128\n", attr_name);
+			}
+			return "(unknown)";
+		}
 	}
 }
 
@@ -123,7 +177,28 @@ char *dwarf_attr_form_to_str(uint8_t attr_form) {
 		case 0x17: { return "DW_FORM_sec_offset"; } break;
 		case 0x18: { return "DW_FORM_exprloc"; } break;
 		case 0x19: { return "DW_FORM_flag_present"; } break;
-		default:   { return "(unknown)"; }
+		default:   {
+			if (attr_form > 0x80) {
+				panic("TODO Error on attr_form (0x%x) We don't actually handle LEB128\n", attr_form);
+			}
+			return "(unknown)";
+		}
+	}
+}
+
+void print_abbrev_table(AbbrevUnit *entries, int entry_count) {
+	for (int i = 0; i < entry_count; i++) {
+		AbbrevUnit *entry = &entries[i];
+		printf("Entry ID: %u\n", entry->id);
+		printf(" - type: %s (0x%x)\n", dwarf_tag_to_str(entry->type), entry->type);
+		printf(" - children: %s\n", ((entry->has_children) ? "yes" : "no"));
+		printf(" - attributes: %d\n", entry->attr_count);
+
+		for (int j = 0; j < (entry->attr_count * 2); j += 2) {
+			uint8_t attr_name = entry->attr_buf[j];
+			uint8_t attr_form = entry->attr_buf[j + 1];
+			printf("(0x%02x) %-18s (0x%02x) %s\n", attr_name, dwarf_attr_name_to_str(attr_name), attr_form, dwarf_attr_form_to_str(attr_form));
+		}
 	}
 }
 
@@ -239,7 +314,7 @@ int main(int argc, char **argv) {
 	}
 
 	if (!elf_hdr->e_shstrndx) {
-		panic("I'd like a string table please! TODO\n");
+		panic("TODO This debugger requires symbols to be able to debug the file\n");
 	}
 
 	printf("ELF entry location:            %lu\n", elf_hdr->e_entry);
@@ -260,9 +335,11 @@ int main(int argc, char **argv) {
 	}
 
 	uint8_t *debug_info = NULL;
+	uint64_t debug_info_offset = 0;
 	int debug_info_size = 0;
 
 	uint8_t *debug_abbrev = NULL;
+	uint64_t debug_abbrev_offset = 0;
 	int debug_abbrev_size = 0;
 
 	char *strtable = (char *)(buffer + strtable_hdr->sh_offset);
@@ -283,67 +360,81 @@ int main(int argc, char **argv) {
 		char dbgabbrev_str[] = ".debug_abbrev";
 
 		if (!(strncmp(section_name, dbginfo_str, sizeof(dbginfo_str)))) {
-			debug_info = buffer + sect_hdr->sh_offset;
+			debug_info_offset = sect_hdr->sh_offset;
 			debug_info_size = sect_hdr->sh_size;
+			debug_info = buffer + debug_info_offset;
 		} else if (!(strncmp(section_name, dbgabbrev_str, sizeof(dbgabbrev_str)))) {
-			debug_abbrev = buffer + sect_hdr->sh_offset;
+			debug_abbrev_offset = sect_hdr->sh_offset;
 			debug_abbrev_size = sect_hdr->sh_size;
+			debug_abbrev = buffer + debug_abbrev_offset;
 		}
 	}
 
-	if (debug_info && debug_abbrev) {
-		printf("Parsing .debug_info\n");
-		if ((*(uint32_t *)debug_info) == 0xFFFFFFFF) {
-			panic("Currently this debugger only handles 32 bit DWARF! TODO\n");
+	if (!(debug_info && debug_abbrev)) {
+		panic("TODO Currently this debugger only supports binaries with debug symbols!\n");
+	}
+
+	printf("Parsing .debug_info\n");
+	if ((*(uint32_t *)debug_info) == 0xFFFFFFFF) {
+		panic("TODO Currently this debugger only handles 32 bit DWARF!\n");
+	}
+
+
+	DWARF32_CUHdr *cu_hdr = (DWARF32_CUHdr *)debug_info;
+	if (cu_hdr->version != 4) {
+		panic("TODO This code only supports DWARF 4, got %d!\n", cu_hdr->version);
+	}
+
+	printf("Building the abbreviation table\n");
+
+	#define ABBREV_MAX 1024
+	int abbrev_len = 0;
+	AbbrevUnit abbrev_entries[ABBREV_MAX] = {0};
+
+	int i = 0;
+	while (i < debug_abbrev_size) {
+		uint8_t abbrev_code        = debug_abbrev[i + 0];
+		if (abbrev_code == 0) {
+			break;
 		}
 
-		DWARF32_CUHdr *cu_hdr = (DWARF32_CUHdr *)debug_info;
-
-		if (cu_hdr->version != 4) {
-			panic("This code only supports DWARF 4, got %d!\n", cu_hdr->version);
+		if (abbrev_len + 1 > ABBREV_MAX) {
+			panic("TODO This should probably be dynamic!\n");
 		}
 
-		printf("debug_info useful size: %x\n", cu_hdr->unit_length);
-		printf("DWARF version: %d\n", cu_hdr->version);
-		printf("debug entry abbrev offset: %x\n", cu_hdr->debug_abbrev_offset);
-		printf("arch address size: %d bytes\n", cu_hdr->address_size);
+		AbbrevUnit *entry = &abbrev_entries[abbrev_len++];
+		entry->id = abbrev_code;
+		entry->type = debug_abbrev[i + 1];
+		entry->has_children = debug_abbrev[i + 2];
+		i += 3;
 
-		{
-			uint8_t abbrev_code = *(debug_info + sizeof(DWARF32_CUHdr));
-			printf("Abbreviation code: %u\n", abbrev_code);
-		}
+		entry->attr_buf = buffer + debug_abbrev_offset + i;
 
-		printf("Parsing .debug_abbrev\n");
-		int i = 0;
+		int attr_count = 0;
 		while (i < debug_abbrev_size) {
-			uint8_t abbrev_code        = debug_abbrev[i + 0];
-			printf("Abbreviation code: %u\n", abbrev_code);
-			if (abbrev_code == 0) {
-				printf("Found the end of the abbrev table\n");
+			uint8_t attr_name = debug_abbrev[i + 0];
+			uint8_t attr_form = debug_abbrev[i + 1];
+
+			i += 2;
+			if (attr_name == 0 && attr_form == 0) {
 				break;
 			}
 
-			uint8_t entry_tag          = debug_abbrev[i + 1];
-			uint8_t entry_has_children = debug_abbrev[i + 2];
-			i += 3;
-
-			printf("Entry Tag: %s (0x%x)\n", dwarf_tag_to_str(entry_tag), entry_tag);
-			printf("Entry has children: %s\n", ((entry_has_children) ? "yes" : "no"));
-
-			while (i < debug_abbrev_size) {
-				uint8_t attr_name = debug_abbrev[i + 0];
-				uint8_t attr_form = debug_abbrev[i + 1];
-
-				printf("%s %s (0x%x, 0x%x)\n", dwarf_attr_name_to_str(attr_name), dwarf_attr_form_to_str(attr_form), attr_name, attr_form);
-
-				i += 2;
-				if (attr_name == 0 && attr_form == 0) {
-					printf("Found end attribute\n");
-					break;
-				}
-			}
+			attr_count += 1;
 		}
+
+		entry->attr_count = attr_count;
 	}
+
+	print_abbrev_table(abbrev_entries, abbrev_len);
+
+	printf("CU size: %x\n", cu_hdr->unit_length);
+	printf("DWARF version: %d\n", cu_hdr->version);
+	printf("debug entry abbrev offset: %x\n", cu_hdr->debug_abbrev_offset);
+	printf("arch address size: %d bytes\n", cu_hdr->address_size);
+
+	uint8_t abbrev_code = *(debug_info + sizeof(DWARF32_CUHdr));
+	printf("Abbreviation code: %u\n", abbrev_code);
 
 	// Attempt to debug program
 	int pid = fork();
