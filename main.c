@@ -8,6 +8,7 @@
 #include <sys/wait.h>
 #include <sys/ptrace.h>
 #include <sys/user.h>
+#include <sys/personality.h>
 
 /*
  * Handy References:
@@ -616,6 +617,10 @@ int main(int argc, char **argv) {
 	int pid = fork();
 	if (pid == 0) {
 		ptrace(PTRACE_TRACEME, 0, NULL, NULL);
+
+		// Turn off stack address randomization for more consistent debugging
+		personality(ADDR_NO_RANDOMIZE);
+
 		execvp(bin_name, argv + 1);
 
 		panic("Failed to run program %s\n", bin_name);
@@ -628,9 +633,14 @@ int main(int argc, char **argv) {
 
 	struct user_regs_struct regs;
 	ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-	uint64_t break_addr = regs.rip + 3;
+	uint64_t break_addr = 0x401bf0; // Address of main? Soon to be pulled from the DWARF instead of hardcoded
 
 	uint64_t orig_data = inject_breakpoint_at_addr(pid, break_addr);
+	ptrace(PTRACE_CONT, pid, NULL, NULL);
+	wait(&status);
+	if (WIFEXITED(status)) {
+		panic("Bailed before reaching main?\n");
+	}
 
 	for (;;) {
 		ptrace(PTRACE_GETREGS, pid, NULL, &regs);
@@ -653,6 +663,13 @@ int main(int argc, char **argv) {
 		printf("R13: %llx\n", regs.r13);
 		printf("R14: %llx\n", regs.r14);
 		printf("R15: %llx\n", regs.r15);
+		printf("EFLAGS: %llx\n", regs.eflags);
+		printf("cs: %llx\n", regs.cs);
+		printf("ss: %llx\n", regs.ss);
+		printf("ds: %llx\n", regs.ds);
+		printf("es: %llx\n", regs.es);
+		printf("fs: %llx\n", regs.fs);
+		printf("gs: %llx\n", regs.gs);
 		printf("Current Inst: 0x%lx\n", cur_inst);
 
 		if (regs.rip == break_addr) {
