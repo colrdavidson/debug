@@ -1,5 +1,7 @@
 #include <stdio.h>
 
+void super(void);
+
 typedef struct {
 	int ret;
 } foobar;
@@ -9,6 +11,8 @@ int main(void) {
 
 	foobar foo;
 	foo.ret = 2;
+
+	super();
 
 	return foo.ret;
 }
