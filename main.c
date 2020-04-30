@@ -83,6 +83,7 @@ enum {
 	DW_FORM_data4        = 0x06,
 	DW_FORM_data1        = 0x0b,
 	DW_FORM_strp         = 0x0e,
+	DW_FORM_udata        = 0x0f,
 	DW_FORM_ref4         = 0x13,
 	DW_FORM_sec_offset   = 0x17,
 	DW_FORM_exprloc      = 0x18,
@@ -114,6 +115,7 @@ enum {
 	DW_AT_high_pc              = 0x12,
 	DW_AT_language             = 0x13,
 	DW_AT_comp_dir             = 0x1b,
+	DW_AT_const_value          = 0x1c,
 	DW_AT_inline               = 0x20,
 	DW_AT_producer             = 0x25,
 	DW_AT_prototyped           = 0x27,
@@ -196,6 +198,7 @@ char *dwarf_attr_name_to_str(uint8_t attr_name) {
 		case DW_AT_high_pc:              { return "DW_AT_high_pc"; } break;
 		case DW_AT_language:             { return "DW_AT_language"; } break;
 		case DW_AT_comp_dir:             { return "DW_AT_comp_dir"; } break;
+		case DW_AT_const_value:          { return "DW_AT_const_value"; } break;
 		case DW_AT_inline:               { return "DW_AT_inline"; } break;
 		case DW_AT_producer:             { return "DW_AT_producer"; } break;
 		case DW_AT_prototyped:           { return "DW_AT_prototyped"; } break;
@@ -225,10 +228,11 @@ char *dwarf_attr_form_to_str(uint8_t attr_form) {
 	switch (attr_form) {
 		case 0:                    { return "0"; } break;
 		case DW_FORM_addr:         { return "DW_FORM_addr"; } break;
+		case DW_FORM_data1:        { return "DW_FORM_data1"; } break;
 		case DW_FORM_data2:        { return "DW_FORM_data2"; } break;
 		case DW_FORM_data4:        { return "DW_FORM_data4"; } break;
-		case DW_FORM_data1:        { return "DW_FORM_data1"; } break;
 		case DW_FORM_strp:         { return "DW_FORM_strp"; } break;
+		case DW_FORM_udata:        { return "DW_FORM_udata"; } break;
 		case DW_FORM_ref4:         { return "DW_FORM_ref4"; } break;
 		case DW_FORM_sec_offset:   { return "DW_FORM_sec_offset"; } break;
 		case DW_FORM_exprloc:      { return "DW_FORM_exprloc"; } break;
@@ -509,15 +513,16 @@ int main(int argc, char **argv) {
 		if (cu_hdr->version != 4) {
 			panic("TODO This code only supports DWARF 4, got %d!\n", cu_hdr->version);
 		}
-
 		i += sizeof(DWARF32_CUHdr);
-		while (i < debug_info_size) {
+
+		int child_level = 0;
+		do {
 			uint8_t abbrev_id = *(debug_info + i);
 			i += 1;
 
-			printf("<%u>\n", abbrev_id);
 			if (abbrev_id == 0) {
-				break;
+				child_level--;
+				continue;
 			}
 
 			AbbrevUnit *entry = NULL;
@@ -528,11 +533,15 @@ int main(int argc, char **argv) {
 					break;
 				}
 			}
-
 			if (!entry) {
 				panic("Unable to find abbrev_table entry %u\n", abbrev_id);
 			}
 
+			if (entry->has_children) {
+				child_level++;
+			}
+
+			printf("Abbrev %u: (%s) [%s]\n", abbrev_id, dwarf_tag_to_str(entry->type), ((entry->has_children) ? "has children" : "no children"));
 			for (int j = 0; j < (entry->attr_count * 2); j += 2) {
 				uint8_t attr_name = entry->attr_buf[j];
 				uint8_t attr_form = entry->attr_buf[j + 1];
@@ -572,6 +581,15 @@ int main(int argc, char **argv) {
 
 						i += sizeof(uint32_t);
 					} break;
+					case DW_FORM_udata: {
+						uint8_t data = *(debug_info + i);
+						if (data > 127) {
+							panic("Unable to handle LEB128 TODO\n");
+						}
+						printf("%-18s 0x%02x\n", dwarf_attr_name_to_str(attr_name), data);
+
+						i += sizeof(uint8_t);
+					} break;
 					case DW_FORM_ref4: {
 						uint32_t offset = *((uint32_t *)(debug_info + i));
 						printf("%-18s 0x%x\n", dwarf_attr_name_to_str(attr_name), offset);
@@ -581,25 +599,36 @@ int main(int argc, char **argv) {
 					case DW_FORM_sec_offset: {
 						uint32_t sect_off = *((uint32_t *)(debug_info + i));
 
-						if (attr_name == DW_AT_stmt_list) {
-							//uint8_t *line_start = debug_line + sect_off;
-							printf("%-18s offset: 0x%x\n", dwarf_attr_name_to_str(attr_name), sect_off);
-						} else {
-							panic("Case not handled!\n");
+						switch (attr_name) {
+							case DW_AT_stmt_list: {
+								//uint8_t *line_start = debug_line + sect_off;
+								printf("%-18s line offset: 0x%x\n", dwarf_attr_name_to_str(attr_name), sect_off);
+							} break;
+							case DW_AT_location: {
+								//uint8_t *location_start = debug_line + sect_off;
+								printf("%-18s location offset: 0x%x\n", dwarf_attr_name_to_str(attr_name), sect_off);
+							} break;
+							case DW_AT_ranges: {
+								//uint8_t *ranges_start = debug_ranges + sect_off;
+								printf("%-18s ranges offset: 0x%x\n", dwarf_attr_name_to_str(attr_name), sect_off);
+							} break;
+							default: {
+								panic("DW_FORM_sec_offset: Case not handled! %u (%s)\n", attr_name, dwarf_attr_name_to_str(attr_name));
+							}
 						}
 
 						i += sizeof(uint32_t);
 					} break;
 					case DW_FORM_exprloc: {
 						uint8_t length = *(debug_info + i);
-						if (length != 1) {
+						if (length > 127) {
 							panic("Unable to handle LEB128 TODO\n");
 						}
 
-						uint8_t expr = *(debug_info + i + 1);
+						uint64_t expr_off = i + 1;
 
-						printf("%-18s length: %u, expr: 0x%x\n", dwarf_attr_name_to_str(attr_name), length, expr);
-						i += length + sizeof(uint8_t);
+						printf("%-18s length: %u, expression offset: 0x%lx\n", dwarf_attr_name_to_str(attr_name), length, (uint64_t)expr_off);
+						i += sizeof(uint8_t) + length;
 					} break;
 					case DW_FORM_flag_present: {
 						printf("%-18s flag present\n", dwarf_attr_name_to_str(attr_name));
@@ -610,7 +639,9 @@ int main(int argc, char **argv) {
 					}
 				}
 			}
-		}
+
+			printf("\n");
+		} while (i < debug_info_size && child_level > 0);
 	}
 
 	// Attempt to debug program
