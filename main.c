@@ -57,6 +57,18 @@ typedef struct {
 	uint32_t debug_abbrev_offset;
 	uint8_t  address_size;
 } DWARF32_CUHdr;
+
+typedef struct {
+	uint32_t unit_length;
+	uint16_t version;
+	uint32_t header_length;
+	uint8_t  min_inst_length;
+	uint8_t  max_ops_per_inst;
+	uint8_t  default_is_stmt;
+	int8_t   line_base;
+	int8_t   line_range;
+	uint8_t  opcode_base;
+} DWARF32_LineHdr;
 #pragma pack()
 
 typedef struct {
@@ -448,7 +460,7 @@ int main(int argc, char **argv) {
 		}
 	}
 
-	if (!(debug_info && debug_abbrev)) {
+	if (!(debug_info && debug_abbrev && debug_line)) {
 		panic("TODO Currently this debugger only supports binaries with debug symbols!\n");
 	}
 
@@ -642,6 +654,102 @@ int main(int argc, char **argv) {
 
 			printf("\n");
 		} while (i < debug_info_size && child_level > 0);
+	}
+
+	printf("Parsing .debug_line\n");
+	i = 0;
+	while (i < debug_line_size) {
+		DWARF32_LineHdr *line_hdr = (DWARF32_LineHdr *)(debug_line + i);
+		if ((*(uint32_t *)(debug_line + i)) == 0xFFFFFFFF) {
+			panic("TODO Currently this debugger only handles 32 bit DWARF!\n");
+		}
+
+		printf("Length: %u\n", line_hdr->unit_length);
+		printf("DWARF version: %d\n", line_hdr->version);
+		printf("Header length: %d\n", line_hdr->header_length);
+		printf("Minimum instruction length: %d\n", line_hdr->min_inst_length);
+		printf("Max operations per instruction: %d\n", line_hdr->max_ops_per_inst);
+		printf("Initial is_stmt value: %d\n", line_hdr->default_is_stmt);
+		printf("Line base: %d\n", line_hdr->line_base);
+		printf("Line range: %d\n", line_hdr->line_range);
+		printf("Opcode base: %d\n", line_hdr->opcode_base);
+		if (line_hdr->version != 4) {
+			panic("TODO This code only supports DWARF 4, got %d!\n", line_hdr->version);
+		}
+
+		if (line_hdr->opcode_base != 13) {
+			panic("TODO This debugger can't handle non-standard line ops!\n");
+		}
+		i += sizeof(DWARF32_LineHdr);
+		printf("\n");
+
+		uint8_t *op_lengths = debug_line + i;
+		int op_lengths_size = line_hdr->opcode_base - 1;
+
+		for (int j = 0; j < op_lengths_size; j++) {
+			printf("Opcode %d has %d args\n", j + 1, op_lengths[j]);
+		}
+		i += op_lengths_size;
+		printf("\n");
+
+		printf("Directory Table\n");
+		int dir_count = 0;
+		while (i < debug_line_size) {
+			char *filename = (char *)(debug_line + i);
+
+			int filename_length = strnlen(filename, debug_line_size - i);
+			i += filename_length + 1;
+			if (filename_length == 0) {
+				break;
+			}
+
+			dir_count++;
+			printf("%d %s\n", dir_count, filename);
+		}
+		if (!dir_count) {
+			printf("- Empty\n");
+		}
+		printf("\n");
+
+		printf("File Table\n");
+		while (i < debug_line_size) {
+			char *filename = (char *)(debug_line + i);
+
+			int filename_length = strnlen(filename, debug_line_size - i);
+			i += filename_length + 1;
+			if (filename_length == 0) {
+				break;
+			}
+
+			uint8_t dir_idx = *(debug_line + i);
+			if (dir_idx > 127) {
+				panic("Unable to handle LEB128 TODO\n");
+			}
+			i++;
+
+			uint8_t last_modified = *(debug_line + i);
+			if (last_modified > 127) {
+				panic("Unable to handle LEB128 TODO\n");
+			}
+			i++;
+
+			uint8_t file_size = *(debug_line + i);
+			if (file_size > 127) {
+				panic("Unable to handle LEB128 TODO\n");
+			}
+			i++;
+
+			printf("Dir: %u, Time: %u, Size: %u, File: %s\n", dir_idx, last_modified, file_size, filename);
+		}
+		printf("\n");
+
+		uint32_t cu_size  = line_hdr->unit_length + sizeof(line_hdr->unit_length);
+		uint32_t hdr_size = line_hdr->header_length + sizeof(line_hdr->unit_length) + sizeof(line_hdr->version) + sizeof(line_hdr->header_length);
+
+		uint32_t rem_size = cu_size - hdr_size;
+		printf("Opcode blob size: %u\n\n", rem_size);
+
+		i += rem_size;
 	}
 
 	// Attempt to debug program
