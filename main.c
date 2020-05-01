@@ -79,6 +79,17 @@ typedef struct {
 	int      attr_count;
 } AbbrevUnit;
 
+typedef struct {
+	char    *filenames[1024];
+	uint8_t  dir_idx[1024];
+	int       file_count;
+	char     *dirs[1024];
+	int       dir_count;
+	uint8_t  *op_buf;
+	uint32_t  op_buf_size;
+	uint8_t   default_is_stmt;
+} CULineTable;
+
 enum {
 	SHT_NULL = 0,
 	SHT_PROGBITS,
@@ -339,7 +350,12 @@ int main(int argc, char **argv) {
 		panic("Please provide the debugger a program to debug!\n");
 	}
 
-	char *bin_name = calloc(1, PATH_MAX);
+	char cur_dir[PATH_MAX + 1];
+	if (getcwd(cur_dir, sizeof(cur_dir)) == NULL) {
+		panic("Failed to get current dir!\n");
+	}
+
+	char *bin_name = calloc(1, PATH_MAX + 1);
 	int fd = open_binary(argv[1], &bin_name);
 	if (fd < 0) {
 		panic("Failed to open program %s\n", argv[1]);
@@ -656,6 +672,10 @@ int main(int argc, char **argv) {
 		} while (i < debug_info_size && child_level > 0);
 	}
 
+	#define LINE_TABLES_MAX 20
+	int line_tables_len = 0;
+	CULineTable *line_tables = malloc(sizeof(CULineTable) * LINE_TABLES_MAX);
+
 	printf("Parsing .debug_line\n");
 	i = 0;
 	while (i < debug_line_size) {
@@ -664,15 +684,12 @@ int main(int argc, char **argv) {
 			panic("TODO Currently this debugger only handles 32 bit DWARF!\n");
 		}
 
-		printf("Length: %u\n", line_hdr->unit_length);
-		printf("DWARF version: %d\n", line_hdr->version);
-		printf("Header length: %d\n", line_hdr->header_length);
-		printf("Minimum instruction length: %d\n", line_hdr->min_inst_length);
-		printf("Max operations per instruction: %d\n", line_hdr->max_ops_per_inst);
-		printf("Initial is_stmt value: %d\n", line_hdr->default_is_stmt);
-		printf("Line base: %d\n", line_hdr->line_base);
-		printf("Line range: %d\n", line_hdr->line_range);
-		printf("Opcode base: %d\n", line_hdr->opcode_base);
+		CULineTable *line_table = &line_tables[line_tables_len];
+		if (line_tables_len + 1 > LINE_TABLES_MAX) {
+			panic("TODO make the line tables properly stretchy!\n");
+		}
+		line_tables_len++;
+
 		if (line_hdr->version != 4) {
 			panic("TODO This code only supports DWARF 4, got %d!\n", line_hdr->version);
 		}
@@ -681,37 +698,27 @@ int main(int argc, char **argv) {
 			panic("TODO This debugger can't handle non-standard line ops!\n");
 		}
 		i += sizeof(DWARF32_LineHdr);
-		printf("\n");
 
-		uint8_t *op_lengths = debug_line + i;
 		int op_lengths_size = line_hdr->opcode_base - 1;
-
-		for (int j = 0; j < op_lengths_size; j++) {
-			printf("Opcode %d has %d args\n", j + 1, op_lengths[j]);
-		}
 		i += op_lengths_size;
-		printf("\n");
 
-		printf("Directory Table\n");
-		int dir_count = 0;
+		line_table->dirs[0] = cur_dir;
+		int dir_count = 1;
 		while (i < debug_line_size) {
-			char *filename = (char *)(debug_line + i);
+			char *dirname = (char *)(debug_line + i);
+			line_table->dirs[dir_count] = dirname;
 
-			int filename_length = strnlen(filename, debug_line_size - i);
-			i += filename_length + 1;
-			if (filename_length == 0) {
+			int dirname_length = strnlen(dirname, debug_line_size - i);
+			i += dirname_length + 1;
+			if (dirname_length == 0) {
 				break;
 			}
 
 			dir_count++;
-			printf("%d %s\n", dir_count, filename);
 		}
-		if (!dir_count) {
-			printf("- Empty\n");
-		}
-		printf("\n");
+		line_table->dir_count = dir_count;
 
-		printf("File Table\n");
+		int file_count = 0;
 		while (i < debug_line_size) {
 			char *filename = (char *)(debug_line + i);
 
@@ -739,17 +746,35 @@ int main(int argc, char **argv) {
 			}
 			i++;
 
-			printf("Dir: %u, Time: %u, Size: %u, File: %s\n", dir_idx, last_modified, file_size, filename);
+			line_table->filenames[file_count] = filename;
+			line_table->dir_idx[file_count]   = dir_idx;
+			file_count++;
 		}
-		printf("\n");
+		line_table->file_count = file_count;
 
 		uint32_t cu_size  = line_hdr->unit_length + sizeof(line_hdr->unit_length);
 		uint32_t hdr_size = line_hdr->header_length + sizeof(line_hdr->unit_length) + sizeof(line_hdr->version) + sizeof(line_hdr->header_length);
 
 		uint32_t rem_size = cu_size - hdr_size;
-		printf("Opcode blob size: %u\n\n", rem_size);
+
+		line_table->op_buf      = debug_line + i;
+		line_table->op_buf_size = rem_size;
 
 		i += rem_size;
+	}
+
+	for (i = 0; i < line_tables_len; i++) {
+		CULineTable line_table = line_tables[i];
+		printf("CU Line Table %d\n", i + 1);
+		printf("Files:\n");
+		for (int j = 0; j < line_table.file_count; j++) {
+			uint8_t dir_idx = line_table.dir_idx[j];
+			char *dirname = line_table.dirs[dir_idx];
+
+			printf("- %s/%s\n", dirname, line_table.filenames[j]);
+		}
+		printf("default is_stmt: %d\n", line_table.default_is_stmt);
+		printf("\n");
 	}
 
 	// Attempt to debug program
