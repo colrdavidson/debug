@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -80,15 +81,38 @@ typedef struct {
 } AbbrevUnit;
 
 typedef struct {
+	uint64_t address;
+	uint32_t op_idx;
+	uint32_t file_idx;
+	uint32_t line_num;
+	uint32_t col_num;
+	bool     is_stmt;
+	bool     basic_block;
+	bool     end_sequence;
+	bool     prologue_end;
+	bool     epilogue_begin;
+	uint32_t isa;
+	uint32_t discriminator;
+} LineMachine;
+
+typedef struct {
 	char    *filenames[1024];
-	uint8_t  dir_idx[1024];
-	int       file_count;
-	char     *dirs[1024];
-	int       dir_count;
-	uint8_t  *op_buf;
-	uint32_t  op_buf_size;
-	uint8_t   default_is_stmt;
+	int      file_count;
+	uint64_t dir_idx[1024];
+	char    *dirs[1024];
+	int      dir_count;
+	uint8_t *op_buf;
+	uint32_t op_buf_size;
+	bool     default_is_stmt;
+	int8_t   line_base;
+	int8_t   line_range;
+	uint8_t  opcode_base;
+
+	LineMachine *lines;
+	int line_count;
+	int line_max;
 } CULineTable;
+
 
 enum {
 	SHT_NULL = 0,
@@ -157,32 +181,81 @@ enum {
 	DW_AT_call_line            = 0x59,
 };
 
-typedef struct {
-	uint8_t *data;
-	size_t   off;
-	size_t   length;
-} dol_t;
+enum {
+	DW_LNE_end_sequence = 0x01,
+	DW_LNE_set_address  = 0x02
+};
 
-uint64_t get_leb128_u(dol_t *buf) {
-	uint64_t result = 0;
-	uint64_t shift = 0;
+enum {
+	DW_LNS_copy             = 0x01,
+	DW_LNS_advance_pc       = 0x02,
+	DW_LNS_advance_line     = 0x03,
+	DW_LNS_set_file         = 0x04,
+	DW_LNS_set_column       = 0x05,
+	DW_LNS_negate_stmt      = 0x06,
+	DW_LNS_const_add_pc     = 0x08,
+	DW_LNS_set_prologue_end = 0x0a,
+};
 
-	uint8_t low_mask = 0b01111111;
-	for (;;) {
-		if ((buf->data + buf->off + 1) > (buf->data + buf->length)) {
-			panic("Ran out of buffer space for leb128 building!\n");
-		}
 
-		uint8_t byte = buf->data[buf->off++];
-		result |= ((byte & low_mask) << shift);
-		if ((~low_mask) == 0) {
-			break;
-		}
+// GLOBALS
 
+uint32_t break_line = 9;
+char *break_file = "dummy.c";
+
+
+int64_t get_leb128_i(uint8_t *buf, uint32_t *size) {
+	uint8_t *ptr = buf;
+	int64_t  result = 0;
+	uint32_t shift = 0;
+
+	uint8_t  byte;
+	do {
+		byte = *ptr++;
+		result |= ((uint64_t)(byte & 0x7f)) << shift;
 		shift += 7;
+	} while (byte >= 128);
+
+	// Fuss with negative number sign extension
+	if (shift < 64 && (byte & 0x40)) {
+		result |= (~0) << shift;
 	}
 
+	*size = (uint32_t)(ptr - buf);
+
 	return result;
+}
+
+uint64_t get_leb128_u(uint8_t *buf, uint32_t *size) {
+	uint8_t *ptr = buf;
+	int64_t  result = 0;
+	uint32_t shift = 0;
+
+	uint8_t  byte;
+	do {
+		byte = *ptr++;
+		result |= ((uint64_t)(byte & 0x7f)) << shift;
+		shift += 7;
+	} while (byte >= 128);
+
+	*size = (uint32_t)(ptr - buf);
+
+	return result;
+}
+
+void init_line_machine(LineMachine *lm, bool is_stmt) {
+	lm->address        = 0;
+	lm->op_idx         = 0;
+	lm->file_idx       = 1;
+	lm->line_num       = 1;
+	lm->col_num        = 0;
+	lm->basic_block    = false;
+	lm->end_sequence   = false;
+	lm->prologue_end   = false;
+	lm->epilogue_begin = false;
+	lm->isa            = 0;
+	lm->discriminator  = 0;
+	lm->is_stmt        = is_stmt;
 }
 
 char *dwarf_tag_to_str(uint8_t id) {
@@ -269,6 +342,38 @@ char *dwarf_attr_form_to_str(uint8_t attr_form) {
 	}
 }
 
+char *dwarf_line_ext_op_to_str(uint8_t op) {
+	switch (op) {
+		case DW_LNE_end_sequence:       { return "DW_LNE_end_sequence"; } break;
+		case DW_LNE_set_address:        { return "DW_LNE_set_address"; } break;
+		default:   {
+			if (op > 0x80) {
+				panic("TODO Error on line extended op (0x%x) We don't actually handle LEB128\n", op);
+			}
+			return "(unknown)";
+		}
+	}
+}
+
+char *dwarf_line_op_to_str(uint8_t op) {
+	switch (op) {
+		case DW_LNS_copy:             { return "DW_LNS_copy"; } break;
+		case DW_LNS_advance_pc:       { return "DW_LNS_advance_pc"; } break;
+		case DW_LNS_advance_line:     { return "DW_LNS_advance_line"; } break;
+		case DW_LNS_set_file:         { return "DW_LNS_set_file"; } break;
+		case DW_LNS_set_column:       { return "DW_LNS_set_column"; } break;
+		case DW_LNS_negate_stmt:      { return "DW_LNS_negate_statment"; } break;
+		case DW_LNS_set_prologue_end: { return "DW_LNS_set_prologue_end"; } break;
+		case DW_LNS_const_add_pc:     { return "DW_LNS_const_add_pc"; } break;
+		default:   {
+			if (op > 0x80) {
+				panic("TODO Error on line op (0x%x) We don't actually handle LEB128\n", op);
+			}
+			return "(unknown)";
+		}
+	}
+}
+
 void print_abbrev_table(AbbrevUnit *entries, int entry_count) {
 	for (int i = 0; i < entry_count; i++) {
 		AbbrevUnit *entry = &entries[i];
@@ -344,6 +449,7 @@ int open_binary(char *name, char **prog_path) {
 
 	return -1;
 }
+
 
 int main(int argc, char **argv) {
 	if (argc < 2) {
@@ -523,6 +629,7 @@ int main(int argc, char **argv) {
 
 	print_abbrev_table(abbrev_entries, abbrev_len);
 
+	printf("\n");
 	printf("Parsing .debug_info\n");
 
 	i = 0;
@@ -610,13 +717,11 @@ int main(int argc, char **argv) {
 						i += sizeof(uint32_t);
 					} break;
 					case DW_FORM_udata: {
-						uint8_t data = *(debug_info + i);
-						if (data > 127) {
-							panic("Unable to handle LEB128 TODO\n");
-						}
-						printf("%-18s 0x%02x\n", dwarf_attr_name_to_str(attr_name), data);
+						uint32_t leb_size = 0;
+						uint64_t udata = get_leb128_u(debug_info + i, &leb_size);
+						printf("%-18s 0x%02lx\n", dwarf_attr_name_to_str(attr_name), udata);
 
-						i += sizeof(uint8_t);
+						i += leb_size;
 					} break;
 					case DW_FORM_ref4: {
 						uint32_t offset = *((uint32_t *)(debug_info + i));
@@ -648,15 +753,12 @@ int main(int argc, char **argv) {
 						i += sizeof(uint32_t);
 					} break;
 					case DW_FORM_exprloc: {
-						uint8_t length = *(debug_info + i);
-						if (length > 127) {
-							panic("Unable to handle LEB128 TODO\n");
-						}
+						uint32_t leb_size = 0;
+						uint64_t length = get_leb128_u(debug_info + i, &leb_size);
+						uint64_t expr_off = i + leb_size;
 
-						uint64_t expr_off = i + 1;
-
-						printf("%-18s length: %u, expression offset: 0x%lx\n", dwarf_attr_name_to_str(attr_name), length, (uint64_t)expr_off);
-						i += sizeof(uint8_t) + length;
+						printf("%-18s length: %lu, expression offset: 0x%lx\n", dwarf_attr_name_to_str(attr_name), length, (uint64_t)expr_off);
+						i += leb_size + length;
 					} break;
 					case DW_FORM_flag_present: {
 						printf("%-18s flag present\n", dwarf_attr_name_to_str(attr_name));
@@ -716,9 +818,8 @@ int main(int argc, char **argv) {
 
 			dir_count++;
 		}
-		line_table->dir_count = dir_count;
 
-		int file_count = 0;
+		int file_count = 1;
 		while (i < debug_line_size) {
 			char *filename = (char *)(debug_line + i);
 
@@ -728,37 +829,38 @@ int main(int argc, char **argv) {
 				break;
 			}
 
-			uint8_t dir_idx = *(debug_line + i);
-			if (dir_idx > 127) {
-				panic("Unable to handle LEB128 TODO\n");
-			}
-			i++;
+			uint32_t leb_size = 0;
+			uint64_t dir_idx = get_leb128_u(debug_line + i, &leb_size);
+			i += leb_size;
 
-			uint8_t last_modified = *(debug_line + i);
-			if (last_modified > 127) {
-				panic("Unable to handle LEB128 TODO\n");
-			}
-			i++;
+			leb_size = 0;
+			get_leb128_u(debug_line + i, &leb_size); // last modified
+			i += leb_size;
 
-			uint8_t file_size = *(debug_line + i);
-			if (file_size > 127) {
-				panic("Unable to handle LEB128 TODO\n");
-			}
-			i++;
+			leb_size = 0;
+			get_leb128_u(debug_line + i, &leb_size); // file size
+			i += leb_size;
 
 			line_table->filenames[file_count] = filename;
 			line_table->dir_idx[file_count]   = dir_idx;
 			file_count++;
 		}
-		line_table->file_count = file_count;
 
 		uint32_t cu_size  = line_hdr->unit_length + sizeof(line_hdr->unit_length);
 		uint32_t hdr_size = line_hdr->header_length + sizeof(line_hdr->unit_length) + sizeof(line_hdr->version) + sizeof(line_hdr->header_length);
-
 		uint32_t rem_size = cu_size - hdr_size;
 
+		line_table->dir_count   = dir_count;
+		line_table->file_count  = file_count;
 		line_table->op_buf      = debug_line + i;
 		line_table->op_buf_size = rem_size;
+		line_table->opcode_base = line_hdr->opcode_base;
+		line_table->line_base   = line_hdr->line_base;
+		line_table->line_range  = line_hdr->line_range;
+
+		line_table->line_max    = 4096;
+		line_table->lines       = calloc(sizeof(LineMachine), line_table->line_max);
+		line_table->line_count  = 0;
 
 		i += rem_size;
 	}
@@ -773,9 +875,177 @@ int main(int argc, char **argv) {
 
 			printf("- %s/%s\n", dirname, line_table.filenames[j]);
 		}
+		printf("opcode base: %d\n", line_table.opcode_base);
+		printf("line base: %d\n", line_table.line_base);
+		printf("line range: %d\n", line_table.line_range);
 		printf("default is_stmt: %d\n", line_table.default_is_stmt);
 		printf("\n");
 	}
+
+	printf("Line Ops\n");
+	for (i = 0; i < line_tables_len; i++) {
+		CULineTable *line_table = &line_tables[i];
+
+		LineMachine lm_state;
+		init_line_machine(&lm_state, line_table->default_is_stmt);
+
+		for (uint32_t j = 0; j < line_table->op_buf_size; j++) {
+			uint8_t op_byte = *(line_table->op_buf + j);
+
+			//printf("<xxd-check> %lx\n", ((line_table->op_buf + j) - buffer) & (~0x0F));
+
+			if (op_byte >= line_table->opcode_base) {
+				uint8_t real_op = op_byte - line_table->opcode_base;
+
+				int line_inc = line_table->line_base + (real_op % line_table->line_range);
+				int addr_inc = real_op / line_table->line_range;
+
+				printf("Special Op: (0x%02x), Address: 0x%lx + %d, Line: %u + %d\n",
+					op_byte, lm_state.address, addr_inc, lm_state.line_num, line_inc);
+
+				lm_state.line_num += line_inc;
+				lm_state.address  += addr_inc;
+
+				memcpy(&line_table->lines[line_table->line_count++], &lm_state, sizeof(lm_state));
+
+				lm_state.basic_block    = false;
+				lm_state.prologue_end   = false;
+				lm_state.epilogue_begin = false;
+				lm_state.discriminator  = 0;
+
+				continue;
+			}
+
+			switch (op_byte) {
+				case 0: { // Extended Opcodes
+
+					// uint8_t op_size = *(line_table->op_buf + j);
+					j += 2;
+					uint8_t real_op = *(line_table->op_buf + j);
+
+					switch (real_op) {
+						case DW_LNE_end_sequence: {
+							printf("%s (0x%02x)\n", dwarf_line_ext_op_to_str(real_op), real_op);
+
+							lm_state.end_sequence = true;
+
+							memcpy(&line_table->lines[line_table->line_count++], &lm_state, sizeof(lm_state));
+						} break;
+						case DW_LNE_set_address: {
+							uint64_t address = *(uint64_t *)(line_table->op_buf + j + 1);
+							printf("%s (0x%02x) 0x%lx\n", dwarf_line_ext_op_to_str(real_op), real_op, address);
+
+							lm_state.address = address;
+							j += sizeof(address);
+
+						} break;
+						default: {
+							panic("Unhandled extended lineVM op! %02x\n", real_op);
+						}
+					}
+				} break;
+				case DW_LNS_copy: {
+					printf("%s (0x%02x)\n", dwarf_line_op_to_str(op_byte), op_byte);
+
+					memcpy(&line_table->lines[line_table->line_count++], &lm_state, sizeof(lm_state));
+
+					lm_state.discriminator  = 0;
+					lm_state.basic_block    = false;
+					lm_state.prologue_end   = false;
+					lm_state.epilogue_begin = false;
+				} break;
+				case DW_LNS_advance_pc: {
+					uint32_t leb_size = 0;
+					uint64_t addr_inc = get_leb128_u(line_table->op_buf + j + 1, &leb_size);
+
+					printf("%s (0x%02x) address: 0x%lx + %lu\n", dwarf_line_op_to_str(op_byte), op_byte, lm_state.address, addr_inc);
+					lm_state.address += addr_inc;
+
+					j += leb_size;
+				} break;
+				case DW_LNS_advance_line: {
+					uint32_t leb_size = 0;
+					int64_t line_inc = get_leb128_i(line_table->op_buf + j + 1, &leb_size);
+
+					printf("%s (0x%02x) line: %u + %li\n", dwarf_line_op_to_str(op_byte), op_byte, lm_state.line_num, line_inc);
+					lm_state.line_num += line_inc;
+
+					j += leb_size;
+				} break;
+				case DW_LNS_set_file: {
+					uint32_t leb_size = 0;
+					uint64_t file_idx = get_leb128_u(line_table->op_buf + j + 1, &leb_size);
+
+					printf("%s (0x%02x) file_idx: %lu\n", dwarf_line_op_to_str(op_byte), op_byte, file_idx);
+					lm_state.file_idx = file_idx;
+
+					j += leb_size;
+				} break;
+				case DW_LNS_set_column: {
+					uint32_t leb_size = 0;
+					uint64_t col_num = get_leb128_u(line_table->op_buf + j + 1, &leb_size);
+
+					printf("%s (0x%02x) column: %lu\n", dwarf_line_op_to_str(op_byte), op_byte, col_num);
+					lm_state.col_num = col_num;
+
+					j += leb_size;
+				} break;
+				case DW_LNS_negate_stmt: {
+					printf("%s (0x%02x) is_stmt: !%d\n", dwarf_line_op_to_str(op_byte), op_byte, lm_state.is_stmt);
+
+					lm_state.is_stmt = !lm_state.is_stmt;
+				} break;
+				case DW_LNS_const_add_pc: {
+					int addr_inc = (255 - line_table->opcode_base) / line_table->line_range;
+					printf("%s (0x%02x) const: %d\n", dwarf_line_op_to_str(op_byte), op_byte, addr_inc);
+
+					lm_state.address += addr_inc;
+				} break;
+				case DW_LNS_set_prologue_end: {
+					printf("%s (0x%02x) prologue_end = true\n", dwarf_line_op_to_str(op_byte), op_byte);
+					lm_state.prologue_end = true;
+				} break;
+				default: {
+					panic("Unhandled lineVM op! %02x\n", op_byte);
+				}
+			}
+		}
+	}
+
+
+	uint64_t break_addr = ~0;
+
+	printf("\nAttempting to break in %s on line %d\n", break_file, break_line);
+
+	for (i = 0; i < line_tables_len; i++) {
+		CULineTable *line_table = &line_tables[i];
+		int j;
+
+		uint32_t break_file_idx = 0;
+		for (j = 1; j < line_table->file_count; j++) {
+			if (!(strcmp(line_table->filenames[j], break_file))) {
+				break_file_idx = j;
+				break;
+			}
+		}
+		if (j == line_table->file_count) {
+			continue;
+		}
+
+		for (int j = 0; j < line_table->line_count; j++) {
+			LineMachine line = line_table->lines[j];
+
+			if (line.line_num == break_line && break_file_idx == line.file_idx) {
+				break_addr = line.address;
+				break;
+			}
+		}
+	}
+	if (break_addr == (uint64_t)~0) {
+		panic("Failed to find the address for line %d\n", break_line);
+	}
+
+	printf("Found a breakpoint address: 0x%lx!\n", break_addr);
 
 	// Attempt to debug program
 	int pid = fork();
@@ -797,7 +1067,6 @@ int main(int argc, char **argv) {
 
 	struct user_regs_struct regs;
 	ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-	uint64_t break_addr = 0x401bf0; // Address of main? Soon to be pulled from the DWARF instead of hardcoded
 
 	uint64_t orig_data = inject_breakpoint_at_addr(pid, break_addr);
 	ptrace(PTRACE_CONT, pid, NULL, NULL);
