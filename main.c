@@ -461,7 +461,9 @@ int main(int argc, char **argv) {
 		panic("Failed to get current dir!\n");
 	}
 
-	char *bin_name = calloc(1, PATH_MAX + 1);
+	char *bin_name = malloc(PATH_MAX + 1);
+	bin_name[PATH_MAX] = '\0';
+
 	int fd = open_binary(argv[1], &bin_name);
 	if (fd < 0) {
 		panic("Failed to open program %s\n", argv[1]);
