@@ -113,7 +113,6 @@ typedef struct {
 	int line_max;
 } CULineTable;
 
-
 enum {
 	SHT_NULL = 0,
 	SHT_PROGBITS,
@@ -197,11 +196,10 @@ enum {
 	DW_LNS_set_prologue_end = 0x0a,
 };
 
-
 // GLOBALS
 
-uint32_t break_line = 9;
-char *break_file = "dummy.c";
+uint32_t break_line = 4;
+char *break_file = "extra.c";
 
 
 int64_t get_leb128_i(uint8_t *buf, uint32_t *size) {
@@ -394,7 +392,9 @@ static uint64_t inject_breakpoint_at_addr(int pid, uint64_t addr) {
 	uint64_t orig_data = (uint64_t)ptrace(PTRACE_PEEKTEXT, pid, (void *)addr, NULL);
 
 	// Replace first byte of code at address with int 3
+	printf("data: %lx\n", orig_data);
 	uint64_t data_with_trap = (orig_data & (~0xFF)) | 0xCC;
+	printf("trap data: %lx\n", data_with_trap);
 	ptrace(PTRACE_POKETEXT, pid, (void *)addr, (void *)data_with_trap);
 
 	return orig_data;
@@ -1077,10 +1077,48 @@ int main(int argc, char **argv) {
 		panic("Bailed before reaching main?\n");
 	}
 
+	uint64_t trap_rip_cache = break_addr;
 	for (;;) {
 		ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+		uint64_t trap_inst = ptrace(PTRACE_PEEKTEXT, pid, (void *)regs.rip - 1, NULL);
 		uint64_t cur_inst = ptrace(PTRACE_PEEKTEXT, pid, (void *)regs.rip, NULL);
 
+		// check if we just stepped over a trap that needs to be patched
+		if (((regs.rip - 1) == break_addr) && (trap_inst & 0xFF) == 0xCC && trap_rip_cache != regs.rip) {
+			printf("just hit a trap @ %lx\n", break_addr);
+			
+			// prevent infinitely trapping on the instruction we just trapped
+			trap_rip_cache = regs.rip;
+			printf("Patching up breakpoint\n");
+
+			repair_breakpoint(pid, break_addr, orig_data);
+			regs.rip -= 1;
+			ptrace(PTRACE_SETREGS, pid, NULL, &regs);
+			uint64_t new_inst = ptrace(PTRACE_PEEKTEXT, pid, (void *)regs.rip, NULL);
+			printf("fixed instruction: %lx\n", new_inst);
+
+			ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
+
+			wait(&status);
+			if (WIFEXITED(status)) {
+				return 0;
+			}
+
+			orig_data = inject_breakpoint_at_addr(pid, break_addr);
+			printf("Breakpoint restored\n");
+		} else {
+			trap_rip_cache = 0;
+			ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
+
+			wait(&status);
+			if (WIFEXITED(status)) {
+				return 0;
+			}
+		}
+
+		// Dump new regs
+		ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+		uint64_t stack_top = ptrace(PTRACE_PEEKTEXT, pid, (void *)regs.rsp, NULL);
 		printf("RIP: %llx\n", regs.rip);
 		printf("RAX: %llx\n", regs.rax);
 		printf("RBX: %llx\n", regs.rbx);
@@ -1106,29 +1144,7 @@ int main(int argc, char **argv) {
 		printf("fs: %llx\n", regs.fs);
 		printf("gs: %llx\n", regs.gs);
 		printf("Current Inst: 0x%lx\n", cur_inst);
-
-		if (regs.rip == break_addr) {
-			printf("Hopping over breakpoint\n");
-
-			repair_breakpoint(pid, break_addr, orig_data);
-
-			ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
-
-			wait(&status);
-			if (WIFEXITED(status)) {
-				return 0;
-			}
-
-			orig_data = inject_breakpoint_at_addr(pid, break_addr);
-			printf("Breakpoint restored\n");
-		} else {
-			ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
-
-			wait(&status);
-			if (WIFEXITED(status)) {
-				return 0;
-			}
-		}
+		printf("Top of stack: 0x%lx\n", stack_top);
 
 		printf("\n");
 		usleep(500000);

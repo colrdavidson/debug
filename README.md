@@ -7,6 +7,3 @@ TODO:
 
 DONE:
 - Parse ELF debug symbols so breakpoints can be set semantically
-
-Using stb_truetype.h, SDL2, and ProggyClean
-Hopefully long-term I'll be using my own font/window rendering code, but for now those'll get me moving
