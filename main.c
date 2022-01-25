@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <stddef.h>
 #include <stdbool.h>
 #include <string.h>
 #include <unistd.h>
@@ -123,78 +124,129 @@ enum {
 	SHT_DYNAMIC
 };
 
-enum {
-	DW_FORM_addr         = 0x01,
-	DW_FORM_data2        = 0x05,
-	DW_FORM_data4        = 0x06,
-	DW_FORM_data1        = 0x0b,
-	DW_FORM_strp         = 0x0e,
-	DW_FORM_udata        = 0x0f,
-	DW_FORM_ref4         = 0x13,
-	DW_FORM_sec_offset   = 0x17,
-	DW_FORM_exprloc      = 0x18,
-	DW_FORM_flag_present = 0x19,
-};
+#define DWARF_FORM \
+	X(DW_FORM_addr, 0x01) \
+	X(DW_FORM_data2, 0x05) \
+	X(DW_FORM_data4, 0x06) \
+	X(DW_FORM_data1, 0x0b) \
+	X(DW_FORM_strp, 0x0e) \
+	X(DW_FORM_udata, 0x0f) \
+	X(DW_FORM_ref4, 0x13) \
+	X(DW_FORM_sec_offset, 0x17) \
+	X(DW_FORM_exprloc, 0x18) \
+	X(DW_FORM_flag_present, 0x19)
 
-enum {
-	DW_TAG_array_type         = 0x01,
-	DW_TAG_formal_parameter   = 0x05,
-	DW_TAG_lexical_block      = 0x0b,
-	DW_TAG_member             = 0x0d,
-	DW_TAG_pointer_type       = 0x0f,
-	DW_TAG_compile_unit       = 0x11,
-	DW_TAG_structure_type     = 0x13,
-	DW_TAG_typedef            = 0x16,
-	DW_TAG_inlined_subroutine = 0x1d,
-	DW_TAG_subrange_type      = 0x21,
-	DW_TAG_subprogram         = 0x2e,
-	DW_TAG_base_type          = 0x24,
-	DW_TAG_variable           = 0x34,
-};
+#define DWARF_TAG \
+	X(DW_TAG_array_type, 0x01) \
+	X(DW_TAG_formal_parameter, 0x05) \
+	X(DW_TAG_lexical_block, 0x0b) \
+	X(DW_TAG_member, 0x0d) \
+	X(DW_TAG_pointer_type, 0x0f) \
+	X(DW_TAG_compile_unit, 0x11) \
+	X(DW_TAG_structure_type, 0x13) \
+	X(DW_TAG_typedef, 0x16) \
+	X(DW_TAG_inlined_subroutine, 0x1d) \
+	X(DW_TAG_subrange_type, 0x21) \
+	X(DW_TAG_subprogram, 0x2e) \
+	X(DW_TAG_base_type, 0x24) \
+	X(DW_TAG_variable, 0x34) \
 
-enum {
-	DW_AT_location             = 0x02,
-	DW_AT_name                 = 0x03,
-	DW_AT_byte_size            = 0x0b,
-	DW_AT_stmt_list            = 0x10,
-	DW_AT_low_pc               = 0x11,
-	DW_AT_high_pc              = 0x12,
-	DW_AT_language             = 0x13,
-	DW_AT_comp_dir             = 0x1b,
-	DW_AT_const_value          = 0x1c,
-	DW_AT_inline               = 0x20,
-	DW_AT_producer             = 0x25,
-	DW_AT_prototyped           = 0x27,
-	DW_AT_abstract_origin      = 0x31,
-	DW_AT_count                = 0x37,
-	DW_AT_data_member_location = 0x38,
-	DW_AT_decl_file            = 0x3a,
-	DW_AT_decl_line            = 0x3b,
-	DW_AT_encoding             = 0x3e,
-	DW_AT_external             = 0x3f,
-	DW_AT_frame_base           = 0x40,
-	DW_AT_type                 = 0x49,
-	DW_AT_ranges               = 0x55,
-	DW_AT_call_column          = 0x57,
-	DW_AT_call_file            = 0x58,
-	DW_AT_call_line            = 0x59,
-};
+#define DWARF_AT \
+	X(DW_AT_location, 0x02) \
+	X(DW_AT_name, 0x03) \
+	X(DW_AT_byte_size, 0x0b) \
+	X(DW_AT_stmt_list, 0x10) \
+	X(DW_AT_low_pc, 0x11) \
+	X(DW_AT_high_pc, 0x12) \
+	X(DW_AT_language, 0x13) \
+	X(DW_AT_comp_dir, 0x1b) \
+	X(DW_AT_const_value, 0x1c) \
+	X(DW_AT_inline, 0x20) \
+	X(DW_AT_producer, 0x25) \
+	X(DW_AT_prototyped, 0x27) \
+	X(DW_AT_abstract_origin, 0x31) \
+	X(DW_AT_count, 0x37) \
+	X(DW_AT_data_member_location, 0x38) \
+	X(DW_AT_decl_file, 0x3a) \
+	X(DW_AT_decl_line, 0x3b) \
+	X(DW_AT_encoding, 0x3e) \
+	X(DW_AT_external, 0x3f) \
+	X(DW_AT_frame_base, 0x40) \
+	X(DW_AT_type, 0x49) \
+	X(DW_AT_ranges, 0x55) \
+	X(DW_AT_call_column, 0x57) \
+	X(DW_AT_call_file, 0x58) \
+	X(DW_AT_call_line, 0x59)
 
-enum {
-	DW_LNE_end_sequence = 0x01,
-	DW_LNE_set_address  = 0x02
-};
+#define DWARF_LINE \
+	X(DW_LNE_end_sequence, 0x01) \
+	X(DW_LNE_set_address, 0x02)
 
-enum {
-	DW_LNS_copy             = 0x01,
-	DW_LNS_advance_pc       = 0x02,
-	DW_LNS_advance_line     = 0x03,
-	DW_LNS_set_file         = 0x04,
-	DW_LNS_set_column       = 0x05,
-	DW_LNS_negate_stmt      = 0x06,
-	DW_LNS_const_add_pc     = 0x08,
-	DW_LNS_set_prologue_end = 0x0a,
-};
+#define DWARF_LNS \
+	X(DW_LNS_copy, 0x01) \
+	X(DW_LNS_advance_pc, 0x02) \
+	X(DW_LNS_advance_line, 0x03) \
+	X(DW_LNS_set_file, 0x04) \
+	X(DW_LNS_set_column, 0x05) \
+	X(DW_LNS_negate_stmt, 0x06) \
+	X(DW_LNS_const_add_pc, 0x08) \
+	X(DW_LNS_set_prologue_end, 0x0a)
+
+#define DWARF_OP \
+	X(DW_OP_addr, 0x03) \
+	X(DW_OP_deref, 0x06) \
+	X(DW_OP_const1u, 0x08) \
+	X(DW_OP_const1s, 0x09) \
+	X(DW_OP_const2u, 0x0a) \
+	X(DW_OP_const2s, 0x0b) \
+	X(DW_OP_const4u, 0x0c) \
+	X(DW_OP_const4s, 0x0d) \
+	X(DW_OP_const8u, 0x0e) \
+	X(DW_OP_const8s, 0x0f) \
+	X(DW_OP_constu, 0x10) \
+	X(DW_OP_consts, 0x11) \
+	X(DW_OP_dup, 0x12) \
+	X(DW_OP_drop, 0x13) \
+	X(DW_OP_over, 0x14) \
+	X(DW_OP_pick, 0x15) \
+	X(DW_OP_swap, 0x16) \
+	X(DW_OP_rot, 0x17) \
+	X(DW_OP_xderef, 0x18) \
+	X(DW_OP_abs, 0x19) \
+	X(DW_OP_and, 0x1a) \
+	X(DW_OP_div, 0x1b) \
+	X(DW_OP_minus, 0x1c) \
+	X(DW_OP_mod, 0x1d) \
+	X(DW_OP_mul, 0x1e) \
+	X(DW_OP_neg, 0x1f) \
+	X(DW_OP_not, 0x20) \
+	X(DW_OP_or, 0x21) \
+	X(DW_OP_plus, 0x22) \
+	X(DW_OP_plus_uconst, 0x23) \
+	X(DW_OP_shl, 0x24) \
+	X(DW_OP_shr, 0x25) \
+	X(DW_OP_shra, 0x26) \
+	X(DW_OP_xor, 0x27) \
+	X(DW_OP_bra, 0x28) \
+	X(DW_OP_eq, 0x29) \
+	X(DW_OP_ge, 0x2a) \
+	X(DW_OP_gt, 0x2b) \
+	X(DW_OP_le, 0x2c) \
+	X(DW_OP_lt, 0x2d) \
+	X(DW_OP_ne, 0x2e) \
+	X(DW_OP_skip, 0x2f) \
+	X(DW_OP_regx, 0x90) \
+	X(DW_OP_fbreg, 0x91) \
+
+#define X(name, value) name = value,
+enum { DWARF_FORM };
+enum { DWARF_TAG };
+enum { DWARF_AT };
+enum { DWARF_LINE };
+enum { DWARF_LNS };
+enum { DWARF_OP };
+#undef X
+
 
 // GLOBALS
 
@@ -259,19 +311,9 @@ void init_line_machine(LineMachine *lm, bool is_stmt) {
 char *dwarf_tag_to_str(uint8_t id) {
 	switch (id) {
 		case 0:    { return "0"; } break;
-		case DW_TAG_array_type:         { return "DW_TAG_array_type"; } break;
-		case DW_TAG_formal_parameter:   { return "DW_TAG_formal_parameter"; } break;
-		case DW_TAG_lexical_block:      { return "DW_TAG_lexical_block"; } break;
-		case DW_TAG_member:             { return "DW_TAG_member"; } break;
-		case DW_TAG_pointer_type:       { return "DW_TAG_pointer_type"; } break;
-		case DW_TAG_compile_unit:       { return "DW_TAG_compile_unit"; } break;
-		case DW_TAG_structure_type:     { return "DW_TAG_structure_type"; } break;
-		case DW_TAG_typedef:            { return "DW_TAG_typedef"; } break;
-		case DW_TAG_inlined_subroutine: { return "DW_TAG_inlined_subroutine"; } break;
-		case DW_TAG_subrange_type:      { return "DW_TAG_subrange_type"; } break;
-		case DW_TAG_subprogram:         { return "DW_TAG_subprogram"; } break;
-		case DW_TAG_base_type:          { return "DW_TAG_base_type"; } break;
-		case DW_TAG_variable:           { return "DW_TAG_variable"; } break;
+		#define X(name, value) case name: { return #name; } break;
+			DWARF_TAG
+		#undef X
 		default:   {
 			if (id > 0x80) {
 				panic("TODO Error on tag (0x%x) We don't actually handle LEB128\n", id);
@@ -284,31 +326,9 @@ char *dwarf_tag_to_str(uint8_t id) {
 char *dwarf_attr_name_to_str(uint8_t attr_name) {
 	switch (attr_name) {
 		case 0:    { return "0"; } break;
-		case DW_AT_location:             { return "DW_AT_location"; } break;
-		case DW_AT_name:                 { return "DW_AT_name"; } break;
-		case DW_AT_byte_size:            { return "DW_AT_byte_size"; } break;
-		case DW_AT_stmt_list:            { return "DW_AT_stmt_list"; } break;
-		case DW_AT_low_pc:               { return "DW_AT_low_pc"; } break;
-		case DW_AT_high_pc:              { return "DW_AT_high_pc"; } break;
-		case DW_AT_language:             { return "DW_AT_language"; } break;
-		case DW_AT_comp_dir:             { return "DW_AT_comp_dir"; } break;
-		case DW_AT_const_value:          { return "DW_AT_const_value"; } break;
-		case DW_AT_inline:               { return "DW_AT_inline"; } break;
-		case DW_AT_producer:             { return "DW_AT_producer"; } break;
-		case DW_AT_prototyped:           { return "DW_AT_prototyped"; } break;
-		case DW_AT_abstract_origin:      { return "DW_AT_abstract_origin"; } break;
-		case DW_AT_count:                { return "DW_AT_count"; } break;
-		case DW_AT_data_member_location: { return "DW_AT_data_member_location"; } break;
-		case DW_AT_decl_file:            { return "DW_AT_decl_file"; } break;
-		case DW_AT_decl_line:            { return "DW_AT_decl_line"; } break;
-		case DW_AT_encoding:             { return "DW_AT_encoding"; } break;
-		case DW_AT_external:             { return "DW_AT_external"; } break;
-		case DW_AT_frame_base:           { return "DW_AT_frame_base"; } break;
-		case DW_AT_type:                 { return "DW_AT_type"; } break;
-		case DW_AT_ranges:               { return "DW_AT_ranges"; } break;
-		case DW_AT_call_column:          { return "DW_AT_call_column"; } break;
-		case DW_AT_call_file:            { return "DW_AT_call_file"; } break;
-		case DW_AT_call_line:            { return "DW_AT_call_line"; } break;
+		#define X(name, value) case name: { return #name; } break;
+			DWARF_AT
+		#undef X
 		default:   {
 			if (attr_name > 0x80) {
 				panic("TODO Error on attr_name (0x%x) We don't actually handle LEB128\n", attr_name);
@@ -318,19 +338,13 @@ char *dwarf_attr_name_to_str(uint8_t attr_name) {
 	}
 }
 
+
 char *dwarf_attr_form_to_str(uint8_t attr_form) {
 	switch (attr_form) {
 		case 0:                    { return "0"; } break;
-		case DW_FORM_addr:         { return "DW_FORM_addr"; } break;
-		case DW_FORM_data1:        { return "DW_FORM_data1"; } break;
-		case DW_FORM_data2:        { return "DW_FORM_data2"; } break;
-		case DW_FORM_data4:        { return "DW_FORM_data4"; } break;
-		case DW_FORM_strp:         { return "DW_FORM_strp"; } break;
-		case DW_FORM_udata:        { return "DW_FORM_udata"; } break;
-		case DW_FORM_ref4:         { return "DW_FORM_ref4"; } break;
-		case DW_FORM_sec_offset:   { return "DW_FORM_sec_offset"; } break;
-		case DW_FORM_exprloc:      { return "DW_FORM_exprloc"; } break;
-		case DW_FORM_flag_present: { return "DW_FORM_flag_present"; } break;
+		#define X(name, value) case name: { return #name; } break;
+			DWARF_FORM
+		#undef X
 		default:   {
 			if (attr_form > 0x80) {
 				panic("TODO Error on attr_form (0x%x) We don't actually handle LEB128\n", attr_form);
@@ -342,8 +356,9 @@ char *dwarf_attr_form_to_str(uint8_t attr_form) {
 
 char *dwarf_line_ext_op_to_str(uint8_t op) {
 	switch (op) {
-		case DW_LNE_end_sequence:       { return "DW_LNE_end_sequence"; } break;
-		case DW_LNE_set_address:        { return "DW_LNE_set_address"; } break;
+		#define X(name, value) case name: { return #name; } break;
+			DWARF_LINE
+		#undef X
 		default:   {
 			if (op > 0x80) {
 				panic("TODO Error on line extended op (0x%x) We don't actually handle LEB128\n", op);
@@ -355,18 +370,41 @@ char *dwarf_line_ext_op_to_str(uint8_t op) {
 
 char *dwarf_line_op_to_str(uint8_t op) {
 	switch (op) {
-		case DW_LNS_copy:             { return "DW_LNS_copy"; } break;
-		case DW_LNS_advance_pc:       { return "DW_LNS_advance_pc"; } break;
-		case DW_LNS_advance_line:     { return "DW_LNS_advance_line"; } break;
-		case DW_LNS_set_file:         { return "DW_LNS_set_file"; } break;
-		case DW_LNS_set_column:       { return "DW_LNS_set_column"; } break;
-		case DW_LNS_negate_stmt:      { return "DW_LNS_negate_statment"; } break;
-		case DW_LNS_set_prologue_end: { return "DW_LNS_set_prologue_end"; } break;
-		case DW_LNS_const_add_pc:     { return "DW_LNS_const_add_pc"; } break;
+		#define X(name, value) case name: { return #name; } break;
+			DWARF_LNS
+		#undef X
 		default:   {
 			if (op > 0x80) {
 				panic("TODO Error on line op (0x%x) We don't actually handle LEB128\n", op);
 			}
+			return "(unknown)";
+		}
+	}
+}
+
+char *dwarf_expr_op_to_str(uint8_t expr_op) {
+	static char op_str_cache[10];
+
+	if (expr_op >= 0x30 && expr_op <= 0x4f) {
+		sprintf(op_str_cache, "DW_OP_lit%d", expr_op - 0x30);
+		return op_str_cache;
+	}
+
+	if (expr_op >= 0x50 && expr_op <= 0x6f) {
+		sprintf(op_str_cache, "DW_OP_reg%d", expr_op - 0x50);
+		return op_str_cache;
+	}
+
+	if (expr_op >= 0x71 && expr_op <= 0x8f) {
+		sprintf(op_str_cache, "DW_OP_breg%d", expr_op - 0x71);
+		return op_str_cache;
+	}
+
+	switch (expr_op) {
+		#define X(name, value) case name: { return #name; } break;
+			DWARF_OP
+		#undef X
+		default:   {
 			return "(unknown)";
 		}
 	}
@@ -759,7 +797,40 @@ int main(int argc, char **argv) {
 						uint64_t length = get_leb128_u(debug_info + i, &leb_size);
 						uint64_t expr_off = i + leb_size;
 
-						printf("%-18s length: %lu, expression offset: 0x%lx\n", dwarf_attr_name_to_str(attr_name), length, (uint64_t)expr_off);
+
+						uint8_t *expr_start = debug_info + expr_off;
+						printf("%-18s DW_FORM_exprloc [", dwarf_attr_name_to_str(attr_name));
+						for (uint64_t j = 0; j < length; j++) {
+							uint8_t expr_op = expr_start[j];
+							if (expr_op >= 0x50 && expr_op <= 0x6f) {
+								printf("%s", dwarf_expr_op_to_str(expr_op));
+							} else if (expr_op >= 0x70 && expr_op <= 0x8f) {
+								printf("%s", dwarf_expr_op_to_str(expr_op));
+							} else {
+								switch (expr_op) {
+									case DW_OP_regx: {
+										uint32_t leb_size = 0;
+										uint64_t val = get_leb128_u(expr_start + j + 1, &leb_size);
+
+										printf("%s 0x%02lx", dwarf_expr_op_to_str(expr_op), val);
+										j += leb_size;
+									} break;
+									case DW_OP_xderef: {
+										printf("%s", dwarf_expr_op_to_str(expr_op));
+									} break;
+									case DW_OP_fbreg: {
+										printf("%s", dwarf_expr_op_to_str(expr_op));
+									} break;
+									default: {
+										panic("Unhandled form: (0x%02x) %s!\n", expr_op, dwarf_expr_op_to_str(expr_op));
+									}
+								}
+							}
+
+							if (j < length - 1) printf(" ");
+						}
+						printf("]\n");
+
 						i += leb_size + length;
 					} break;
 					case DW_FORM_flag_present: {
@@ -1014,7 +1085,6 @@ int main(int argc, char **argv) {
 		}
 	}
 
-
 	uint64_t break_addr = ~0;
 
 	printf("\nAttempting to break in %s on line %d\n", break_file, break_line);
@@ -1070,6 +1140,8 @@ int main(int argc, char **argv) {
 	struct user_regs_struct regs;
 	ptrace(PTRACE_GETREGS, pid, NULL, &regs);
 
+	//ptrace(PTRACE_POKEUSER, pid, (void *)offsetof(struct user, u_debugreg[0]), (void *)0x7fffffffd7a8);
+
 	uint64_t orig_data = inject_breakpoint_at_addr(pid, break_addr);
 	ptrace(PTRACE_CONT, pid, NULL, NULL);
 	wait(&status);
@@ -1118,6 +1190,7 @@ int main(int argc, char **argv) {
 
 		// Dump new regs
 		ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+		uint64_t debug_1 = ptrace(PTRACE_PEEKUSER, pid, (void *)offsetof(struct user, u_debugreg[0]), NULL);
 		uint64_t stack_top = ptrace(PTRACE_PEEKTEXT, pid, (void *)regs.rsp, NULL);
 		printf("RIP: %llx\n", regs.rip);
 		printf("RAX: %llx\n", regs.rax);
@@ -1145,6 +1218,7 @@ int main(int argc, char **argv) {
 		printf("gs: %llx\n", regs.gs);
 		printf("Current Inst: 0x%lx\n", cur_inst);
 		printf("Top of stack: 0x%lx\n", stack_top);
+		printf("debug 1: %lx\n", debug_1);
 
 		printf("\n");
 		usleep(500000);

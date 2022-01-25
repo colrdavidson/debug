@@ -12,7 +12,7 @@ int main(void) {
 	foobar foo;
 	foo.ret = 2;
 
-	super();
+	super(&foo.ret);
 
 	return foo.ret;
 }
