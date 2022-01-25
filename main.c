@@ -74,7 +74,23 @@ typedef struct {
 #pragma pack()
 
 typedef struct {
-	uint8_t  id;
+	uint64_t id;
+	uint64_t func_id;
+	char *name;
+	uint8_t *expr;
+	int expr_len;
+} VarUnit;
+
+typedef struct {
+	uint64_t id;
+	uint64_t cu_id;
+	char *name;
+	uint8_t *expr;
+	int expr_len;
+} FuncUnit;
+
+typedef struct {
+	uint64_t  id;
 	uint32_t type;
 	uint8_t  has_children;
 	uint8_t *attr_buf;
@@ -413,7 +429,7 @@ char *dwarf_expr_op_to_str(uint8_t expr_op) {
 void print_abbrev_table(AbbrevUnit *entries, int entry_count) {
 	for (int i = 0; i < entry_count; i++) {
 		AbbrevUnit *entry = &entries[i];
-		printf("Entry ID: %u\n", entry->id);
+		printf("Entry ID: %lu\n", entry->id);
 		printf(" - type: %s (0x%x)\n", dwarf_tag_to_str(entry->type), entry->type);
 		printf(" - children: %s\n", ((entry->has_children) ? "yes" : "no"));
 		printf(" - attributes: %d\n", entry->attr_count);
@@ -632,9 +648,11 @@ int main(int argc, char **argv) {
 	int abbrev_len = 0;
 	AbbrevUnit abbrev_entries[ABBREV_MAX] = {0};
 
+
 	int i = 0;
 	while (i < debug_abbrev_size) {
-		uint8_t abbrev_code        = debug_abbrev[i + 0];
+		uint32_t leb_size = 0;
+		uint64_t abbrev_code = get_leb128_u(debug_abbrev + i, &leb_size);
 		if (abbrev_code == 0) {
 			break;
 		}
@@ -644,10 +662,13 @@ int main(int argc, char **argv) {
 		}
 
 		AbbrevUnit *entry = &abbrev_entries[abbrev_len++];
+
+		i += leb_size;
 		entry->id = abbrev_code;
-		entry->type = debug_abbrev[i + 1];
-		entry->has_children = debug_abbrev[i + 2];
-		i += 3;
+		entry->type = debug_abbrev[i]; // technically, type is a LEB128 too, but that's unlikely to actually occur
+		entry->has_children = debug_abbrev[i + 1];
+		i += 2;
+
 
 		entry->attr_buf = buffer + debug_abbrev_offset + i;
 
@@ -671,6 +692,17 @@ int main(int argc, char **argv) {
 
 	printf("\n");
 	printf("Parsing .debug_info\n");
+
+	#define FUNCTION_MAX 1024
+	int funcs_len = 0;
+	FuncUnit func_table[FUNCTION_MAX] = {0};
+
+	#define VARIABLE_MAX 1024
+	int vars_len = 0;
+	VarUnit var_table[VARIABLE_MAX] = {0};
+
+	#define ABBREV_STACK_MAX 20
+	AbbrevUnit *entry_stack[ABBREV_STACK_MAX] = {0};
 
 	i = 0;
 	while (i < debug_info_size) {
@@ -712,6 +744,37 @@ int main(int argc, char **argv) {
 				panic("Unable to find abbrev_table entry %u\n", abbrev_id);
 			}
 
+
+			FuncUnit *func = NULL;
+			VarUnit *var = NULL;
+			// flesh out functions and variables, and create linkages to parent nodes
+			if (entry->type == DW_TAG_subprogram) {
+				if (funcs_len + 1 > FUNCTION_MAX) {
+					panic("TODO This should probably be dynamic!\n");
+				}
+
+				func = &func_table[funcs_len++];
+				func->id = entry->id;
+
+				AbbrevUnit *parent = entry_stack[child_level - 1];
+				if (parent->type == DW_TAG_compile_unit) {
+					func->cu_id = parent->id;
+				}
+			} else if (entry->type == DW_TAG_variable) {
+				if (vars_len + 1 > VARIABLE_MAX) {
+					panic("TODO This should probably be dynamic!\n");
+				}
+
+				var = &var_table[vars_len++];
+				var->id = entry->id;
+
+				AbbrevUnit *parent = entry_stack[child_level - 1];
+				if (parent->type == DW_TAG_subprogram) {
+					var->func_id = parent->id;
+				}
+			}
+
+			entry_stack[child_level] = entry;
 			if (entry->has_children) {
 				child_level++;
 			}
@@ -725,6 +788,14 @@ int main(int argc, char **argv) {
 					case DW_FORM_strp: {
 						uint32_t str_off = *((uint32_t *)(debug_info + i));
 						printf("%-18s offset: (0x%x) %s\n", dwarf_attr_name_to_str(attr_name), str_off, (debug_str + str_off));
+
+						if (attr_name == DW_AT_name) {
+							if (entry->type == DW_TAG_variable) {
+								var->name = (char *)(debug_str + str_off);
+							} else if (entry->type == DW_TAG_subprogram) {
+								func->name = (char *)(debug_str + str_off);
+							}
+						}
 
 						i += sizeof(uint32_t);
 					} break;
@@ -797,15 +868,33 @@ int main(int argc, char **argv) {
 						uint64_t length = get_leb128_u(debug_info + i, &leb_size);
 						uint64_t expr_off = i + leb_size;
 
+						if (attr_name == DW_AT_location) {
+							if (entry->type == DW_TAG_subprogram) {
+								func->expr = debug_info + expr_off;
+								func->expr_len = length;
+							} else if (entry->type == DW_TAG_variable) {
+								var->expr = debug_info + expr_off;
+								var->expr_len = length;
+							}
+						}
 
 						uint8_t *expr_start = debug_info + expr_off;
-						printf("%-18s DW_FORM_exprloc [", dwarf_attr_name_to_str(attr_name));
+						printf("%-18s %s [", dwarf_attr_form_to_str(attr_form), dwarf_attr_name_to_str(attr_name));
 						for (uint64_t j = 0; j < length; j++) {
 							uint8_t expr_op = expr_start[j];
-							if (expr_op >= 0x50 && expr_op <= 0x6f) {
+
+							// DW_OP_lit
+							if (expr_op >= 0x30 && expr_op <= 0x4f) {
 								printf("%s", dwarf_expr_op_to_str(expr_op));
+
+							// DW_OP_reg
+							} else if (expr_op >= 0x50 && expr_op <= 0x6f) {
+								printf("%s", dwarf_expr_op_to_str(expr_op));
+
+							// DW_OP BREG
 							} else if (expr_op >= 0x70 && expr_op <= 0x8f) {
 								printf("%s", dwarf_expr_op_to_str(expr_op));
+
 							} else {
 								switch (expr_op) {
 									case DW_OP_regx: {
@@ -1118,6 +1207,31 @@ int main(int argc, char **argv) {
 	}
 
 	printf("Found a breakpoint address: 0x%lx!\n", break_addr);
+
+	char *break_name = "foo";
+	VarUnit *var = NULL;
+	for (int i = 0; i < vars_len; i++) {
+		if (strcmp(var_table[i].name, break_name) == 0) {
+			var = &var_table[i];
+			break;
+		}
+	}
+	if (!var) {
+		panic("Couldn't find variable \"%s\"!\n", break_name);
+	}
+
+	FuncUnit *func = NULL;
+	for (int i = 0; i < funcs_len; i++) {
+		if (func_table[i].id == var->func_id) {
+			func = &func_table[i];
+			break;
+		}
+	}
+	if (!var) {
+		panic("Couldn't find function for variable \"%s\"!\n", break_name);
+	}
+
+	printf("Found %s in %s\n", var->name, func->name);
 
 	// Attempt to debug program
 	int pid = fork();
