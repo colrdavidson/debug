@@ -87,6 +87,8 @@ typedef struct {
 	char *name;
 	uint8_t *expr;
 	int expr_len;
+	uint64_t low_pc;
+	uint64_t high_pc;
 } FuncUnit;
 
 typedef struct {
@@ -268,6 +270,47 @@ enum { DWARF_OP };
 
 uint32_t break_line = 4;
 char *break_file = "extra.c";
+
+uint64_t get_regval_for_dwarf_reg(struct user_regs_struct *regs, uint8_t idx) {
+	switch (idx) {
+		case 0: { return regs->rax; } break;
+		case 1: { return regs->rdx; } break;
+		case 2: { return regs->rcx; } break;
+		case 3: { return regs->rbx; } break;
+		case 4: { return regs->rsi; } break;
+		case 5: { return regs->rdi; } break;
+		case 6: { return regs->rbp; } break;
+		case 7: { return regs->rsp; } break;
+		case 8: { return regs->r8; } break;
+		case 9: { return regs->r9; } break;
+		case 10: { return regs->r10; } break;
+		case 11: { return regs->r11; } break;
+		case 12: { return regs->r12; } break;
+		case 13: { return regs->r13; } break;
+		case 14: { return regs->r14; } break;
+		case 15: { return regs->r15; } break;
+//		case 16: { return regs->ra; } break;
+/*
+		case 17: { return regs->xmm0; } break;
+		case 18: { return regs->xmm1; } break;
+		case 19: { return regs->xmm2; } break;
+		case 20: { return regs->xmm3; } break;
+		case 21: { return regs->xmm4; } break;
+		case 22: { return regs->xmm5; } break;
+		case 23: { return regs->xmm6; } break;
+		case 24: { return regs->xmm7; } break;
+		case 25: { return regs->xmm8; } break;
+		case 26: { return regs->xmm9; } break;
+		case 27: { return regs->xmm10; } break;
+		case 28: { return regs->xmm11; } break;
+		case 29: { return regs->xmm12; } break;
+		case 30: { return regs->xmm13; } break;
+		case 31: { return regs->xmm14; } break;
+		case 32: { return regs->xmm15; } break;
+*/
+	}	
+	return 0;
+}
 
 
 int64_t get_leb128_i(uint8_t *buf, uint32_t *size) {
@@ -504,6 +547,123 @@ int open_binary(char *name, char **prog_path) {
 	return -1;
 }
 
+typedef enum {
+	DWString,
+	DWVal,
+	DWAddr,
+	DWExpr
+} DWType;
+
+typedef struct {
+	DWType type;
+	union {
+		uint64_t val;
+		uint8_t *expr;
+		char *str;
+	} data;
+	int size;
+	int skip;
+} DWResult;
+
+typedef struct {
+	uint8_t *debug_info;
+	int debug_info_size;
+	uint8_t *debug_line;
+	int debug_line_size;
+	uint8_t *debug_str;
+	int debug_str_size;
+	uint8_t *debug_abbrev;
+	int debug_abbrev_size;
+} DWSections;
+
+DWResult parse_data(AbbrevUnit *entry, DWSections *sections, int data_idx, int attr_idx) {
+	uint8_t attr_name = entry->attr_buf[attr_idx];
+	uint8_t attr_form = entry->attr_buf[attr_idx + 1];
+	uint8_t *debug_info_ptr = sections->debug_info + data_idx;
+
+	DWResult ret = {0};
+
+	switch (attr_form) {
+		case DW_FORM_strp: {
+			uint32_t str_off = *((uint32_t *)debug_info_ptr);
+			char *str = (char *)(sections->debug_str + str_off);
+
+
+			ret.type = DWString;
+			ret.data.str = str;
+			ret.skip = sizeof(uint32_t);
+		} break;
+		case DW_FORM_addr: {
+			uint64_t addr = *((uint64_t *)(debug_info_ptr));
+
+			ret.type = DWAddr;
+			ret.data.val = addr;
+			ret.skip = sizeof(uint64_t);
+		} break;
+		case DW_FORM_data1: {
+			uint8_t data = *debug_info_ptr;
+
+			ret.type = DWVal;
+			ret.data.val = data;
+			ret.skip = sizeof(uint8_t);
+		} break;
+		case DW_FORM_data2: {
+			uint16_t data = *((uint16_t *)debug_info_ptr);
+
+			ret.type = DWVal;
+			ret.data.val = data;
+			ret.skip = sizeof(uint16_t);
+		} break;
+		case DW_FORM_data4: {
+			uint32_t data = *((uint32_t *)debug_info_ptr);
+
+			ret.type = DWVal;
+			ret.data.val = data;
+			ret.skip = sizeof(uint32_t);
+		} break;
+		case DW_FORM_udata: {
+			uint32_t leb_size = 0;
+			uint64_t udata = get_leb128_u(debug_info_ptr, &leb_size);
+
+			ret.type = DWVal;
+			ret.data.val = udata;
+			ret.skip = leb_size;
+		} break;
+		case DW_FORM_ref4: {
+			uint32_t offset = *((uint32_t *)debug_info_ptr);
+
+			ret.type = DWVal;
+			ret.data.val = offset;
+			ret.skip = sizeof(uint32_t);
+		} break;
+		case DW_FORM_sec_offset: {
+			uint32_t sect_off = *((uint32_t *)debug_info_ptr);
+
+			ret.type = DWVal;
+			ret.data.val = sect_off;
+			ret.skip = sizeof(uint32_t);
+		} break;
+		case DW_FORM_exprloc: {
+			uint32_t leb_size = 0;
+			uint64_t length = get_leb128_u(debug_info_ptr, &leb_size);
+
+			ret.type = DWExpr;
+			ret.data.expr = debug_info_ptr + leb_size;
+			ret.skip = leb_size + length;
+			ret.size = length;
+		} break;
+		case DW_FORM_flag_present: {
+			ret.type = DWVal;
+			ret.data.val = 1;
+		} break;
+		default: {
+			printf("(0x%02x) %-18s (0x%02x) %s\n", attr_name, dwarf_attr_name_to_str(attr_name), attr_form, dwarf_attr_form_to_str(attr_form));
+			panic("Unhandled form: (0x%02x) %s!\n", attr_form, dwarf_attr_form_to_str(attr_form));
+		}
+	}
+
+	return ret;
+}
 
 int main(int argc, char **argv) {
 	if (argc < 2) {
@@ -584,21 +744,7 @@ int main(int argc, char **argv) {
 		panic("Executable string table appears invalid!\n");
 	}
 
-	uint8_t *debug_info = NULL;
-	uint64_t debug_info_offset = 0;
-	int debug_info_size = 0;
-
-	uint8_t *debug_abbrev = NULL;
-	uint64_t debug_abbrev_offset = 0;
-	int debug_abbrev_size = 0;
-
-	uint8_t *debug_str = NULL;
-	uint64_t debug_str_offset = 0;
-	int debug_str_size = 0;
-
-	uint8_t *debug_line = NULL;
-	uint64_t debug_line_offset = 0;
-	int debug_line_size = 0;
+	DWSections sections = {0};
 
 	char *strtable = (char *)(buffer + strtable_hdr->sh_offset);
 	for (int i = 0; i < elf_hdr->e_shnum; i++) {
@@ -620,25 +766,21 @@ int main(int argc, char **argv) {
 		char dbgline_str[] = ".debug_line";
 
 		if (!(strncmp(section_name, dbginfo_str, sizeof(dbginfo_str)))) {
-			debug_info_offset = sect_hdr->sh_offset;
-			debug_info_size = sect_hdr->sh_size;
-			debug_info = buffer + debug_info_offset;
+			sections.debug_info_size = sect_hdr->sh_size;
+			sections.debug_info = buffer + sect_hdr->sh_offset;
 		} else if (!(strncmp(section_name, dbgabbrev_str, sizeof(dbgabbrev_str)))) {
-			debug_abbrev_offset = sect_hdr->sh_offset;
-			debug_abbrev_size = sect_hdr->sh_size;
-			debug_abbrev = buffer + debug_abbrev_offset;
+			sections.debug_abbrev_size = sect_hdr->sh_size;
+			sections.debug_abbrev = buffer + sect_hdr->sh_offset;
 		} else if (!(strncmp(section_name, dbgstr_str, sizeof(dbgstr_str)))) {
-			debug_str_offset = sect_hdr->sh_offset;
-			debug_str_size = sect_hdr->sh_size;
-			debug_str = buffer + debug_str_offset;
+			sections.debug_str_size = sect_hdr->sh_size;
+			sections.debug_str = buffer + sect_hdr->sh_offset;
 		} else if (!(strncmp(section_name, dbgline_str, sizeof(dbgline_str)))) {
-			debug_line_offset = sect_hdr->sh_offset;
-			debug_line_size = sect_hdr->sh_size;
-			debug_line = buffer + debug_line_offset;
+			sections.debug_line_size = sect_hdr->sh_size;
+			sections.debug_line = buffer + sect_hdr->sh_offset;
 		}
 	}
 
-	if (!(debug_info && debug_abbrev && debug_line)) {
+	if (!(sections.debug_info && sections.debug_abbrev && sections.debug_line)) {
 		panic("TODO Currently this debugger only supports binaries with debug symbols!\n");
 	}
 
@@ -650,9 +792,9 @@ int main(int argc, char **argv) {
 
 
 	int i = 0;
-	while (i < debug_abbrev_size) {
+	while (i < sections.debug_abbrev_size) {
 		uint32_t leb_size = 0;
-		uint64_t abbrev_code = get_leb128_u(debug_abbrev + i, &leb_size);
+		uint64_t abbrev_code = get_leb128_u(sections.debug_abbrev + i, &leb_size);
 		if (abbrev_code == 0) {
 			break;
 		}
@@ -665,17 +807,17 @@ int main(int argc, char **argv) {
 
 		i += leb_size;
 		entry->id = abbrev_code;
-		entry->type = debug_abbrev[i]; // technically, type is a LEB128 too, but that's unlikely to actually occur
-		entry->has_children = debug_abbrev[i + 1];
+		entry->type = sections.debug_abbrev[i]; // technically, type is a LEB128 too, but that's unlikely to actually occur
+		entry->has_children = sections.debug_abbrev[i + 1];
 		i += 2;
 
 
-		entry->attr_buf = buffer + debug_abbrev_offset + i;
+		entry->attr_buf = sections.debug_abbrev + i;
 
 		int attr_count = 0;
-		while (i < debug_abbrev_size) {
-			uint8_t attr_name = debug_abbrev[i + 0];
-			uint8_t attr_form = debug_abbrev[i + 1];
+		while (i < sections.debug_abbrev_size) {
+			uint8_t attr_name = sections.debug_abbrev[i + 0];
+			uint8_t attr_form = sections.debug_abbrev[i + 1];
 
 			i += 2;
 			if (attr_name == 0 && attr_form == 0) {
@@ -705,10 +847,10 @@ int main(int argc, char **argv) {
 	AbbrevUnit *entry_stack[ABBREV_STACK_MAX] = {0};
 
 	i = 0;
-	while (i < debug_info_size) {
-		DWARF32_CUHdr *cu_hdr = (DWARF32_CUHdr *)(debug_info + i);
+	while (i < sections.debug_info_size) {
+		DWARF32_CUHdr *cu_hdr = (DWARF32_CUHdr *)(sections.debug_info + i);
 
-		if ((*(uint32_t *)debug_info) == 0xFFFFFFFF) {
+		if ((*(uint32_t *)sections.debug_info) == 0xFFFFFFFF) {
 			panic("TODO Currently this debugger only handles 32 bit DWARF!\n");
 		}
 
@@ -724,7 +866,7 @@ int main(int argc, char **argv) {
 
 		int child_level = 0;
 		do {
-			uint8_t abbrev_id = *(debug_info + i);
+			uint8_t abbrev_id = *(sections.debug_info + i);
 			i += 1;
 
 			if (abbrev_id == 0) {
@@ -784,156 +926,53 @@ int main(int argc, char **argv) {
 				uint8_t attr_name = entry->attr_buf[j];
 				uint8_t attr_form = entry->attr_buf[j + 1];
 
-				switch (attr_form) {
-					case DW_FORM_strp: {
-						uint32_t str_off = *((uint32_t *)(debug_info + i));
-						printf("%-18s offset: (0x%x) %s\n", dwarf_attr_name_to_str(attr_name), str_off, (debug_str + str_off));
+				DWResult ret = parse_data(entry, &sections, i, j);
+				printf("(0x%02x) %-18s (0x%02x) %s\n", attr_name, dwarf_attr_name_to_str(attr_name), attr_form, dwarf_attr_form_to_str(attr_form));
 
-						if (attr_name == DW_AT_name) {
-							if (entry->type == DW_TAG_variable) {
-								var->name = (char *)(debug_str + str_off);
-							} else if (entry->type == DW_TAG_subprogram) {
-								func->name = (char *)(debug_str + str_off);
-							}
+				switch (attr_name) {
+					case DW_AT_low_pc: {
+						if (entry->type == DW_TAG_subprogram) {
+							func->low_pc = ret.data.val;
 						}
-
-						i += sizeof(uint32_t);
 					} break;
-					case DW_FORM_addr: {
-						uint64_t addr = *((uint64_t *)(debug_info + i));
-						printf("%-18s 0x%lx\n", dwarf_attr_name_to_str(attr_name), addr);
-
-						i += sizeof(uint64_t);
+					case DW_AT_high_pc: {
+						if (entry->type == DW_TAG_subprogram) {
+							func->high_pc = ret.data.val;
+						}
 					} break;
-					case DW_FORM_data1: {
-						uint8_t data = *(debug_info + i);
-						printf("%-18s 0x%02x\n", dwarf_attr_name_to_str(attr_name), data);
-
-						i += sizeof(uint8_t);
+					case DW_AT_name: {
+						if (entry->type == DW_TAG_subprogram) {
+							func->name = ret.data.str;
+						} else if (entry->type == DW_TAG_variable) {
+							var->name = ret.data.str;
+						}
 					} break;
-					case DW_FORM_data2: {
-						uint16_t data = *((uint16_t *)(debug_info + i));
-						printf("%-18s %u\n", dwarf_attr_name_to_str(attr_name), data);
-
-						if (attr_name == DW_AT_language && data != 0x0c) {
+					case DW_AT_language: {
+						if (ret.data.val != 0x0c) {
 							panic("Debugger currently only supports C99!\n");
 						}
-
-						i += sizeof(uint16_t);
 					} break;
-					case DW_FORM_data4: {
-						uint32_t data = *((uint32_t *)(debug_info + i));
-						printf("%-18s 0x%x\n", dwarf_attr_name_to_str(attr_name), data);
-
-						i += sizeof(uint32_t);
-					} break;
-					case DW_FORM_udata: {
-						uint32_t leb_size = 0;
-						uint64_t udata = get_leb128_u(debug_info + i, &leb_size);
-						printf("%-18s 0x%02lx\n", dwarf_attr_name_to_str(attr_name), udata);
-
-						i += leb_size;
-					} break;
-					case DW_FORM_ref4: {
-						uint32_t offset = *((uint32_t *)(debug_info + i));
-						printf("%-18s 0x%x\n", dwarf_attr_name_to_str(attr_name), offset);
-
-						i += sizeof(uint32_t);
-					} break;
-					case DW_FORM_sec_offset: {
-						uint32_t sect_off = *((uint32_t *)(debug_info + i));
-
-						switch (attr_name) {
-							case DW_AT_stmt_list: {
-								//uint8_t *line_start = debug_line + sect_off;
-								printf("%-18s line offset: 0x%x\n", dwarf_attr_name_to_str(attr_name), sect_off);
-							} break;
-							case DW_AT_location: {
-								//uint8_t *location_start = debug_line + sect_off;
-								printf("%-18s location offset: 0x%x\n", dwarf_attr_name_to_str(attr_name), sect_off);
-							} break;
-							case DW_AT_ranges: {
-								//uint8_t *ranges_start = debug_ranges + sect_off;
-								printf("%-18s ranges offset: 0x%x\n", dwarf_attr_name_to_str(attr_name), sect_off);
-							} break;
-							default: {
-								panic("DW_FORM_sec_offset: Case not handled! %u (%s)\n", attr_name, dwarf_attr_name_to_str(attr_name));
-							}
+					case DW_AT_location: {
+						if (ret.type != DWExpr) {
+							panic("Unable to handle static locations!\n");
 						}
 
-						i += sizeof(uint32_t);
-					} break;
-					case DW_FORM_exprloc: {
-						uint32_t leb_size = 0;
-						uint64_t length = get_leb128_u(debug_info + i, &leb_size);
-						uint64_t expr_off = i + leb_size;
-
-						if (attr_name == DW_AT_location) {
-							if (entry->type == DW_TAG_subprogram) {
-								func->expr = debug_info + expr_off;
-								func->expr_len = length;
-							} else if (entry->type == DW_TAG_variable) {
-								var->expr = debug_info + expr_off;
-								var->expr_len = length;
-							}
+						if (entry->type == DW_TAG_subprogram) {
+							func->expr = ret.data.expr;
+							func->expr_len = ret.size;
+						} else if (entry->type == DW_TAG_variable) {
+							var->expr = ret.data.expr;
+							var->expr_len = ret.size;
 						}
-
-						uint8_t *expr_start = debug_info + expr_off;
-						printf("%-18s %s [", dwarf_attr_form_to_str(attr_form), dwarf_attr_name_to_str(attr_name));
-						for (uint64_t j = 0; j < length; j++) {
-							uint8_t expr_op = expr_start[j];
-
-							// DW_OP_lit
-							if (expr_op >= 0x30 && expr_op <= 0x4f) {
-								printf("%s", dwarf_expr_op_to_str(expr_op));
-
-							// DW_OP_reg
-							} else if (expr_op >= 0x50 && expr_op <= 0x6f) {
-								printf("%s", dwarf_expr_op_to_str(expr_op));
-
-							// DW_OP BREG
-							} else if (expr_op >= 0x70 && expr_op <= 0x8f) {
-								printf("%s", dwarf_expr_op_to_str(expr_op));
-
-							} else {
-								switch (expr_op) {
-									case DW_OP_regx: {
-										uint32_t leb_size = 0;
-										uint64_t val = get_leb128_u(expr_start + j + 1, &leb_size);
-
-										printf("%s 0x%02lx", dwarf_expr_op_to_str(expr_op), val);
-										j += leb_size;
-									} break;
-									case DW_OP_xderef: {
-										printf("%s", dwarf_expr_op_to_str(expr_op));
-									} break;
-									case DW_OP_fbreg: {
-										printf("%s", dwarf_expr_op_to_str(expr_op));
-									} break;
-									default: {
-										panic("Unhandled form: (0x%02x) %s!\n", expr_op, dwarf_expr_op_to_str(expr_op));
-									}
-								}
-							}
-
-							if (j < length - 1) printf(" ");
-						}
-						printf("]\n");
-
-						i += leb_size + length;
 					} break;
-					case DW_FORM_flag_present: {
-						printf("%-18s flag present\n", dwarf_attr_name_to_str(attr_name));
-					} break;
-					default: {
-						printf("(0x%02x) %-18s (0x%02x) %s\n", attr_name, dwarf_attr_name_to_str(attr_name), attr_form, dwarf_attr_form_to_str(attr_form));
-						panic("Unhandled form: (0x%02x) %s!\n", attr_form, dwarf_attr_form_to_str(attr_form));
-					}
+					default: { }
 				}
+
+				i += ret.skip;
 			}
 
 			printf("\n");
-		} while (i < debug_info_size && child_level > 0);
+		} while (i < sections.debug_info_size && child_level > 0);
 	}
 
 	#define LINE_TABLES_MAX 20
@@ -942,9 +981,9 @@ int main(int argc, char **argv) {
 
 	printf("Parsing .debug_line\n");
 	i = 0;
-	while (i < debug_line_size) {
-		DWARF32_LineHdr *line_hdr = (DWARF32_LineHdr *)(debug_line + i);
-		if ((*(uint32_t *)(debug_line + i)) == 0xFFFFFFFF) {
+	while (i < sections.debug_line_size) {
+		DWARF32_LineHdr *line_hdr = (DWARF32_LineHdr *)(sections.debug_line + i);
+		if ((*(uint32_t *)(sections.debug_line + i)) == 0xFFFFFFFF) {
 			panic("TODO Currently this debugger only handles 32 bit DWARF!\n");
 		}
 
@@ -968,11 +1007,11 @@ int main(int argc, char **argv) {
 
 		line_table->dirs[0] = cur_dir;
 		int dir_count = 1;
-		while (i < debug_line_size) {
-			char *dirname = (char *)(debug_line + i);
+		while (i < sections.debug_line_size) {
+			char *dirname = (char *)(sections.debug_line + i);
 			line_table->dirs[dir_count] = dirname;
 
-			int dirname_length = strnlen(dirname, debug_line_size - i);
+			int dirname_length = strnlen(dirname, sections.debug_line_size - i);
 			i += dirname_length + 1;
 			if (dirname_length == 0) {
 				break;
@@ -982,25 +1021,25 @@ int main(int argc, char **argv) {
 		}
 
 		int file_count = 1;
-		while (i < debug_line_size) {
-			char *filename = (char *)(debug_line + i);
+		while (i < sections.debug_line_size) {
+			char *filename = (char *)(sections.debug_line + i);
 
-			int filename_length = strnlen(filename, debug_line_size - i);
+			int filename_length = strnlen(filename, sections.debug_line_size - i);
 			i += filename_length + 1;
 			if (filename_length == 0) {
 				break;
 			}
 
 			uint32_t leb_size = 0;
-			uint64_t dir_idx = get_leb128_u(debug_line + i, &leb_size);
+			uint64_t dir_idx = get_leb128_u(sections.debug_line + i, &leb_size);
 			i += leb_size;
 
 			leb_size = 0;
-			get_leb128_u(debug_line + i, &leb_size); // last modified
+			get_leb128_u(sections.debug_line + i, &leb_size); // last modified
 			i += leb_size;
 
 			leb_size = 0;
-			get_leb128_u(debug_line + i, &leb_size); // file size
+			get_leb128_u(sections.debug_line + i, &leb_size); // file size
 			i += leb_size;
 
 			line_table->filenames[file_count] = filename;
@@ -1014,7 +1053,7 @@ int main(int argc, char **argv) {
 
 		line_table->dir_count   = dir_count;
 		line_table->file_count  = file_count;
-		line_table->op_buf      = debug_line + i;
+		line_table->op_buf      = sections.debug_line + i;
 		line_table->op_buf_size = rem_size;
 		line_table->opcode_base = line_hdr->opcode_base;
 		line_table->line_base   = line_hdr->line_base;
@@ -1230,6 +1269,8 @@ int main(int argc, char **argv) {
 	if (!var) {
 		panic("Couldn't find function for variable \"%s\"!\n", break_name);
 	}
+
+	printf("Function %s lives between 0x%llx and 0x%llx\n", func->name, func->low_pc, func->low_pc + func->high_pc);
 
 	printf("Found %s in %s\n", var->name, func->name);
 
