@@ -281,7 +281,7 @@ enum { DWARF_OP };
 
 // GLOBALS
 
-uint32_t break_line = 10;
+uint32_t break_line = 5;
 char *break_file = "dummy.c";
 
 uint64_t get_regval_for_dwarf_reg(struct user_regs_struct *regs, uint8_t idx) {
@@ -455,7 +455,7 @@ char *dwarf_line_op_to_str(uint8_t op) {
 }
 
 char *dwarf_expr_op_to_str(uint8_t expr_op) {
-	static char op_str_cache[10];
+	static char op_str_cache[16];
 
 	if (expr_op >= 0x30 && expr_op <= 0x4f) {
 		sprintf(op_str_cache, "DW_OP_lit%d", expr_op - 0x30);
@@ -499,19 +499,19 @@ void print_abbrev_table(AbbrevUnit *entries, int entry_count) {
 }
 
 static uint64_t inject_breakpoint_at_addr(int pid, uint64_t addr) {
-	uint64_t orig_data = (uint64_t)ptrace(PTRACE_PEEKTEXT, pid, (void *)addr, NULL);
+	uint64_t orig_data = (uint64_t)ptrace(PTRACE_PEEKDATA, pid, (void *)addr, NULL);
 
 	// Replace first byte of code at address with int 3
 	printf("data: %lx\n", orig_data);
 	uint64_t data_with_trap = (orig_data & (~0xFF)) | 0xCC;
 	printf("trap data: %lx\n", data_with_trap);
-	ptrace(PTRACE_POKETEXT, pid, (void *)addr, (void *)data_with_trap);
+	ptrace(PTRACE_POKEDATA, pid, (void *)addr, (void *)data_with_trap);
 
 	return orig_data;
 }
 
 static void repair_breakpoint(int pid, uint64_t addr, uint64_t orig_data) {
-	ptrace(PTRACE_POKETEXT, pid, (void *)addr, (void *)orig_data);
+	ptrace(PTRACE_POKEDATA, pid, (void *)addr, (void *)orig_data);
 }
 
 static int jump_to_next_breakpoint(int pid) {
@@ -1396,8 +1396,8 @@ int main(int argc, char **argv) {
 	uint64_t trap_rip_cache = break_addr;
 	for (;;) {
 		ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-		uint64_t trap_inst = ptrace(PTRACE_PEEKTEXT, pid, (void *)regs.rip - 1, NULL);
-		uint64_t cur_inst = ptrace(PTRACE_PEEKTEXT, pid, (void *)regs.rip, NULL);
+		uint64_t trap_inst = ptrace(PTRACE_PEEKDATA, pid, (void *)regs.rip - 1, NULL);
+		uint64_t cur_inst = ptrace(PTRACE_PEEKDATA, pid, (void *)regs.rip, NULL);
 
 		// check if we just stepped over a trap that needs to be patched
 		if (((regs.rip - 1) == break_addr) && (trap_inst & 0xFF) == 0xCC && trap_rip_cache != regs.rip) {
@@ -1410,7 +1410,7 @@ int main(int argc, char **argv) {
 			repair_breakpoint(pid, break_addr, orig_data);
 			regs.rip -= 1;
 			ptrace(PTRACE_SETREGS, pid, NULL, &regs);
-			uint64_t new_inst = ptrace(PTRACE_PEEKTEXT, pid, (void *)regs.rip, NULL);
+			uint64_t new_inst = ptrace(PTRACE_PEEKDATA, pid, (void *)regs.rip, NULL);
 			printf("fixed instruction: %lx\n", new_inst);
 
 			ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
@@ -1435,7 +1435,7 @@ int main(int argc, char **argv) {
 		// Dump new regs
 		ptrace(PTRACE_GETREGS, pid, NULL, &regs);
 		uint64_t debug_1 = ptrace(PTRACE_PEEKUSER, pid, (void *)offsetof(struct user, u_debugreg[0]), NULL);
-		uint64_t stack_top = ptrace(PTRACE_PEEKTEXT, pid, (void *)regs.rsp, NULL);
+		uint64_t stack_top = ptrace(PTRACE_PEEKDATA, pid, (void *)regs.rsp, NULL);
 		printf("RIP: %llx\n", regs.rip);
 /*
 		printf("RAX: %llx\n", regs.rax);
@@ -1476,7 +1476,7 @@ int main(int argc, char **argv) {
 			eval_expr(&regs, &em, ex, 0);
 
 			uint64_t var_addr = em.val_stack[0];
-			uint64_t val = ptrace(PTRACE_PEEKTEXT, pid, (void *)var_addr, NULL);
+			uint64_t val = ptrace(PTRACE_PEEKDATA, pid, (void *)var_addr, NULL);
 			printf("Variable %s in %s @ 0x%lx; %ld\n", var->name, func->name, var_addr, val);
 			for (int i = 0; i < em.val_stack_len; i++) {
 				printf("val in stack: 0x%lx\n", em.val_stack[i]);
@@ -1558,7 +1558,7 @@ int main(int argc, char **argv) {
 				panic("Failure to break on breakpoint\n");
 			}
 
-			uint64_t new_val = ptrace(PTRACE_PEEKTEXT, pid, (void *)var_addr, NULL);
+			uint64_t new_val = ptrace(PTRACE_PEEKDATA, pid, (void *)var_addr, NULL);
 			printf("Variable %s in %s @ 0x%lx; %ld\n", var->name, func->name, var_addr, new_val);
 		}
 
