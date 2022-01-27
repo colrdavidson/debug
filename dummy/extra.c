@@ -1,6 +1,7 @@
 #include <stdio.h>
 
 void super(int *data) {
-	*data += 1;
+	int foo = 2;
+	*data += 1 + foo;
 	printf("Yay");
 }

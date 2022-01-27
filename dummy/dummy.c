@@ -1,18 +1,13 @@
 #include <stdio.h>
 
-void super(void);
-
-typedef struct {
-	int ret;
-} foobar;
+void super(int *);
 
 int main(void) {
 	printf("Hello World!\n");
 
-	foobar foo;
-	foo.ret = 2;
+	int ret = 2;
 
-	super(&foo.ret);
+	super(&ret);
 
-	return foo.ret;
+	return ret;
 }
