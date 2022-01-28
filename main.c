@@ -1414,10 +1414,15 @@ int main(int argc, char **argv) {
 */
 
 /*
- *   scope_block
- *   	<undefined>
+ * 	 This gnarly code determines these pieces of 
+ * 	 critical information to figure out variable
+ * 	 and current scope context from RIP via block_table
+ *
+ *   framed_scope_block -- contains frame_base_expr
+ *   	scope_block -- may only contain high/low pc
  *   		<undefined>
- *   		var_block
+ *   			<undefined>
+ *   			var_block -- contains location expr
  */
 		char *break_name = "ret";
 
@@ -1503,6 +1508,7 @@ int main(int argc, char **argv) {
 
 		printf("Function %s in CU %lu\n", framed_scope->name, framed_scope->cu_idx);
 
+		// Determine type of variable
 		Block *type_blk = NULL;
 		for (int i = 0; i < blk_len; i++) {
 			if (block_table[i].au_offset == var_block->type_offset) {
@@ -1539,6 +1545,7 @@ int main(int argc, char **argv) {
 			i += ret.skip;
 		}
 
+		// Determine variable address alignment to figure out how to place variable
 		int is_8b_aligned = (var_addr & 0x7) == 0;
 		int is_4b_aligned = (var_addr & 0x3) == 0;
 		int is_2b_aligned = (var_addr & 0x1) == 0;
