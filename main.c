@@ -75,19 +75,30 @@ typedef struct {
 
 typedef struct {
 	uint64_t id;
-	uint64_t func_id;
+	uint64_t cu_idx;
 
-	char *name;
-	uint32_t type_offset;
+	uint32_t type;
+	uint8_t  has_children;
 
-	uint8_t *expr;
-	int expr_len;
-} VarUnit;
+	uint8_t *attr_buf;
+	int      attr_count;
+} AbbrevUnit;
 
 typedef struct {
-	uint64_t id;
-	uint64_t cu_id;
+	uint8_t  has_children;
+
+	uint64_t idx;
+	uint64_t parent_idx;
 	uint64_t cu_idx;
+	uint64_t au_idx;
+
+	uint8_t *attr_buf;
+	int      attr_count;
+
+	uint32_t type;
+	uint64_t au_offset;
+	uint64_t type_offset;
+
 	char *name;
 
 	uint8_t *loc_expr;
@@ -98,19 +109,7 @@ typedef struct {
 
 	uint64_t low_pc;
 	uint64_t high_pc;
-} FuncUnit;
-
-typedef struct {
-	uint64_t  id;
-	uint64_t  cu_idx;
-
-	uint32_t type;
-	uint8_t  has_children;
-	uint64_t offset;
-
-	uint8_t *attr_buf;
-	int      attr_count;
-} AbbrevUnit;
+} Block;
 
 typedef struct {
 	uint64_t address;
@@ -690,13 +689,12 @@ typedef struct {
 	uint64_t data;
 } DWStackVal;
 
-#define EVAL_STACK_MAX 128
 #define VAL_STACK_MAX 1024
 typedef struct {
 	uint64_t val_stack[VAL_STACK_MAX];
 	int val_stack_len;
 
-	FuncUnit *func;
+	Block *frame_holder;
 } DWExprMachine;
 
 void eval_expr(struct user_regs_struct *regs, DWExprMachine *em, DWExpression in_ex, int depth) {
@@ -712,8 +710,8 @@ void eval_expr(struct user_regs_struct *regs, DWExprMachine *em, DWExpression in
 					uint32_t leb_size = 0;
 					int64_t data = get_leb128_i(in_ex.expr + i + 1, &leb_size);
 
-					DWExpression func_ex = { em->func->frame_base_expr, em->func->frame_base_expr_len };
-					eval_expr(regs, em, func_ex, depth + 1);
+					DWExpression frame_holder_ex = { em->frame_holder->frame_base_expr, em->frame_holder->frame_base_expr_len };
+					eval_expr(regs, em, frame_holder_ex, depth + 1);
 
 					em->val_stack_len--;
 					em->val_stack[em->val_stack_len] = ((int64_t)em->val_stack[em->val_stack_len]) + data;
@@ -877,7 +875,6 @@ int main(int argc, char **argv) {
 		entry->type = get_leb128_u(sections.debug_abbrev + i, &leb_size);
 		i += leb_size;
 
-
 		entry->has_children = sections.debug_abbrev[i];
 		i += 1;
 
@@ -904,18 +901,16 @@ int main(int argc, char **argv) {
 	printf("\n");
 	printf("Parsing .debug_info\n");
 
-	#define FUNCTION_MAX 1024
-	int funcs_len = 0;
-	FuncUnit func_table[FUNCTION_MAX] = {0};
+	#define BLOCK_STACK_MAX 20
+	int entry_stack[BLOCK_STACK_MAX] = {0};
 
-	#define VARIABLE_MAX 1024
-	int vars_len = 0;
-	VarUnit var_table[VARIABLE_MAX] = {0};
+	#define BLOCK_MAX 1024
+	Block block_table[BLOCK_MAX] = {0};
 
-	#define ABBREV_STACK_MAX 20
-	AbbrevUnit *entry_stack[ABBREV_STACK_MAX] = {0};
+	uint64_t cur_cu_count = 0;
+	uint64_t cur_cu_idx = 0;
+	int blk_len = 0;
 
-	uint64_t cur_cu = 0;
 	i = 0;
 	while (i < sections.debug_info_size) {
 		DWARF32_CUHdr *cu_hdr = (DWARF32_CUHdr *)(sections.debug_info + i);
@@ -940,16 +935,16 @@ int main(int argc, char **argv) {
 			uint64_t abbrev_id = get_leb128_u(sections.debug_info + i, &leb_size);
 			i += leb_size;
 
-			printf("ABBREV ID: %ld, CHILD LEVEL: %d, OFFSET: 0x%x\n", abbrev_id, child_level, i - 1);
 			if (abbrev_id == 0) {
 				child_level--;
 				continue;
 			}
 
 			AbbrevUnit *entry = NULL;
-			for (int j = 0; j < abbrev_len; j++) {
-				AbbrevUnit *tmp = &abbrev_entries[j];
-				if (tmp->id == abbrev_id && tmp->cu_idx == cur_cu) {
+			int cur_au = 0;
+			for (; cur_au < abbrev_len; cur_au++) {
+				AbbrevUnit *tmp = &abbrev_entries[cur_au];
+				if (tmp->id == abbrev_id && tmp->cu_idx == cur_cu_count) {
 					entry = tmp;
 					break;
 				}
@@ -958,45 +953,38 @@ int main(int argc, char **argv) {
 				panic("Unable to find abbrev_table entry %lu\n", abbrev_id);
 			}
 
-			entry->offset = i - 1;
-
-			FuncUnit *func = NULL;
-			VarUnit *var = NULL;
-			// flesh out functions and variables, and create linkages to parent nodes
-			if (entry->type == DW_TAG_subprogram) {
-				if (funcs_len + 1 > FUNCTION_MAX) {
-					panic("TODO This should probably be dynamic!\n");
-				}
-
-				func = &func_table[funcs_len++];
-				func->id = entry->id;
-
-				AbbrevUnit *parent = entry_stack[child_level - 1];
-				if (parent->type == DW_TAG_compile_unit) {
-					func->cu_id = parent->id;
-					func->cu_idx = cur_cu;
-				}
-			} else if (entry->type == DW_TAG_variable) {
-				if (vars_len + 1 > VARIABLE_MAX) {
-					panic("TODO This should probably be dynamic!\n");
-				}
-
-				var = &var_table[vars_len++];
-				var->id = entry->id;
-
-				AbbrevUnit *parent = entry_stack[child_level - 1];
-				if (parent->type == DW_TAG_subprogram) {
-					var->func_id = parent->id;
-				}
+			
+			if (entry->type == DW_TAG_compile_unit) {
+				cur_cu_idx = blk_len;
 			}
 
-			entry_stack[child_level] = entry;
+			printf("Abbrev %lu -- %s\n", abbrev_id, dwarf_tag_to_str(entry->type));
+
+			Block *blk = &block_table[blk_len++];
+			blk->au_offset = i - 1;
+			blk->has_children = entry->has_children;
+			blk->type = entry->type;
+			blk->attr_buf = entry->attr_buf;
+			blk->attr_count = entry->attr_count;
+			blk->cu_idx = cur_cu_idx;
+			blk->au_idx = cur_au;
+
 			if (entry->has_children) {
 				child_level++;
-				printf("INCREASED CHILD LEVEL: %d\n", child_level);
 			}
 
-			printf("[0x%lx] Abbrev %lu: (%s) [%s]\n", (uint64_t)entry->offset, abbrev_id, dwarf_tag_to_str(entry->type), ((entry->has_children) ? "has children" : "no children"));
+			printf("setting estack @ %d to %d\n", child_level, blk_len);
+			entry_stack[child_level] = blk_len;
+
+			if (child_level > 0) {
+				int parent_idx = entry_stack[child_level - 1];
+				printf("settng block %d, parent %d\n", blk_len, parent_idx);
+				if (blk_len != parent_idx) {
+					blk->parent_idx = parent_idx;
+				}
+			}
+
+			printf("[0x%lx] Abbrev %d | %lu: (%s) [%s]\n", (uint64_t)blk->au_offset, blk_len, abbrev_id, dwarf_tag_to_str(entry->type), ((entry->has_children) ? "has children" : "no children"));
 			for (int j = 0; j < (entry->attr_count * 2); j += 2) {
 				uint8_t attr_name = entry->attr_buf[j];
 				uint8_t attr_form = entry->attr_buf[j + 1];
@@ -1006,32 +994,20 @@ int main(int argc, char **argv) {
 
 				switch (attr_name) {
 					case DW_AT_frame_base: {
-						if (entry->type == DW_TAG_subprogram) {
-							func->frame_base_expr = ret.data.expr;
-							func->frame_base_expr_len = ret.size;
-						}
+						blk->frame_base_expr = ret.data.expr;
+						blk->frame_base_expr_len = ret.size;
 					} break;
 					case DW_AT_low_pc: {
-						if (entry->type == DW_TAG_subprogram) {
-							func->low_pc = ret.data.val;
-						}
+						blk->low_pc = ret.data.val;
 					} break;
 					case DW_AT_high_pc: {
-						if (entry->type == DW_TAG_subprogram) {
-							func->high_pc = ret.data.val;
-						}
+						blk->high_pc = ret.data.val;
 					} break;
 					case DW_AT_name: {
-						if (entry->type == DW_TAG_subprogram) {
-							func->name = ret.data.str;
-						} else if (entry->type == DW_TAG_variable) {
-							var->name = ret.data.str;
-						}
+						blk->name = ret.data.str;
 					} break;
 					case DW_AT_type: {
-						if (entry->type == DW_TAG_variable) {
-							var->type_offset = (uint32_t)ret.data.val;
-						}
+						blk->type_offset = (uint32_t)ret.data.val;
 					} break;
 					case DW_AT_language: {
 						if (ret.data.val != 0x0c) {
@@ -1043,13 +1019,8 @@ int main(int argc, char **argv) {
 							panic("Unable to handle static locations!\n");
 						}
 
-						if (entry->type == DW_TAG_subprogram) {
-							func->loc_expr = ret.data.expr;
-							func->loc_expr_len = ret.size;
-						} else if (entry->type == DW_TAG_variable) {
-							var->expr = ret.data.expr;
-							var->expr_len = ret.size;
-						}
+						blk->loc_expr = ret.data.expr;
+						blk->loc_expr_len = ret.size;
 					} break;
 					default: { 
 					}
@@ -1061,7 +1032,7 @@ int main(int argc, char **argv) {
 			printf("\n");
 		} while (i < sections.debug_info_size && child_level > 0);
 
-		cur_cu += 1;
+		cur_cu_count += 1;
 	}
 
 	#define LINE_TABLES_MAX 20
@@ -1336,32 +1307,6 @@ int main(int argc, char **argv) {
 
 	printf("Found a breakpoint address: 0x%lx!\n", break_addr);
 
-	char *break_name = "ret";
-	VarUnit *var = NULL;
-	for (int i = 0; i < vars_len; i++) {
-		if (strcmp(var_table[i].name, break_name) == 0) {
-			var = &var_table[i];
-			break;
-		}
-	}
-	if (!var) {
-		panic("Couldn't find variable \"%s\"!\n", break_name);
-	}
-
-	FuncUnit *func = NULL;
-	for (int i = 0; i < funcs_len; i++) {
-		if (func_table[i].id == var->func_id) {
-			func = &func_table[i];
-			break;
-		}
-	}
-	if (!var) {
-		panic("Couldn't find function for variable \"%s\"!\n", break_name);
-	}
-
-	printf("Function %s lives between 0x%lx and 0x%lx\n", func->name, func->low_pc, func->low_pc + func->high_pc);
-
-	printf("Found %s in %s\n", var->name, func->name);
 
 	// Attempt to debug program
 	int pid = fork();
@@ -1436,6 +1381,7 @@ int main(int argc, char **argv) {
 		ptrace(PTRACE_GETREGS, pid, NULL, &regs);
 		uint64_t debug_1 = ptrace(PTRACE_PEEKUSER, pid, (void *)offsetof(struct user, u_debugreg[0]), NULL);
 		uint64_t stack_top = ptrace(PTRACE_PEEKDATA, pid, (void *)regs.rsp, NULL);
+
 		printf("RIP: %llx\n", regs.rip);
 /*
 		printf("RAX: %llx\n", regs.rax);
@@ -1464,104 +1410,167 @@ int main(int argc, char **argv) {
 		printf("Current Inst: 0x%lx\n", cur_inst);
 		printf("Top of stack: 0x%lx\n", stack_top);
 		printf("debug 1: %lx\n", debug_1);
-*/
 		printf("\n");
+*/
 
+/*
+ *   scope_block
+ *   	<undefined>
+ *   		<undefined>
+ *   		var_block
+ */
+		char *break_name = "ret";
 
-		printf("RIP: %llx, LOW: %lx, HIGH: %lx\n", regs.rip, func->low_pc, func->low_pc + func->high_pc);
-		if ((regs.rip >= func->low_pc) && (regs.rip <= (func->low_pc + func->high_pc))) {
-			DWExprMachine em = {0};
-			em.func = func;
-			DWExpression ex = { .expr = var->expr, .len = var->expr_len };
-			eval_expr(&regs, &em, ex, 0);
-
-			uint64_t var_addr = em.val_stack[0];
-			uint64_t val = ptrace(PTRACE_PEEKDATA, pid, (void *)var_addr, NULL);
-			printf("Variable %s in %s @ 0x%lx; %ld\n", var->name, func->name, var_addr, val);
-			for (int i = 0; i < em.val_stack_len; i++) {
-				printf("val in stack: 0x%lx\n", em.val_stack[i]);
+		// Find current scope based on RIP
+		int blk_idx = blk_len - 1;
+		Block *scope_block = NULL;
+		for (; blk_idx >= 0; blk_idx--) {
+			Block *blk = &block_table[blk_idx];
+			if ((regs.rip >= blk->low_pc) && (regs.rip <= (blk->low_pc + blk->high_pc))) {
+				scope_block = blk;
+				break;
 			}
-
-			printf("Function %s in CU %lu\n", func->name, func->cu_idx);
-
-			AbbrevUnit *cu = NULL;
-			for (int i = 0; i < abbrev_len; i++) {
-				if (abbrev_entries[i].id == func->cu_id && abbrev_entries[i].cu_idx == func->cu_idx) {
-					cu = &abbrev_entries[i];
-					break;
-				}
-			}
-			if (!cu) {
-				panic("Unable to find CU for function %s\n", func->name);
-			}
-
-			AbbrevUnit *type_au = NULL;
-			for (int i = 0; i < abbrev_len; i++) {
-				if (abbrev_entries[i].offset == var->type_offset) {
-					type_au = &abbrev_entries[i];
-					break;
-				}
-			}
-			if (!type_au) {
-				panic("Unable to find type AU for function %s\n", func->name);
-			}
-
-
-			int type_width = 0;
-			int i = type_au->offset;
-			for (int j = 0; j < (type_au->attr_count * 2); j += 2) {
-				uint8_t attr_name = type_au->attr_buf[j];
-				uint8_t attr_form = type_au->attr_buf[j + 1];
-
-				DWResult ret = parse_data(type_au, &sections, i + 1, j);
-				switch (attr_name) {
-					case DW_AT_name: {
-						printf("Type is %s\n", ret.data.str);
-					} break;
-					case DW_AT_encoding: {
-						printf("Encoding is %lu\n", ret.data.val);
-					} break;
-					case DW_AT_byte_size: {
-						printf("Byte size is %lu\n", ret.data.val);
-						type_width = ret.data.val;
-					} break;
-				}
-
-				i += ret.skip;
-			}
-
-			int is_8b_aligned = (var_addr & 0x7) == 0;
-			int is_4b_aligned = (var_addr & 0x3) == 0;
-			int is_2b_aligned = (var_addr & 0x1) == 0;
-
-			if (!(is_8b_aligned || is_4b_aligned || is_2b_aligned || type_width == 1)) {
-				panic("Unable to handle unaligned watchpoints!\n");
-			}
-
-			char width_bits = 0;
-			if (type_width == 8) { width_bits = 0b11; }
-			else if (type_width == 4) { width_bits = 0b10; }
-			else if (type_width == 2) { width_bits = 0b01; }
-			else if (type_width == 1) { width_bits = 0b00; }
-
-			// trap with breakpoint 0, R/W
-			uint64_t dr7 = 0b00000000000000110000000000000001;
-			dr7 |= (width_bits << 18);
-
-			ptrace(PTRACE_POKEUSER, pid, (void *)offsetof(struct user, u_debugreg[0]), (void *)var_addr);
-			ptrace(PTRACE_POKEUSER, pid, (void *)offsetof(struct user, u_debugreg[7]), (void *)dr7);
-			ptrace(PTRACE_CONT, pid, NULL, NULL);
-
-			int status;
-			wait(&status);
-			if (!WIFSTOPPED(status)) {
-				panic("Failure to break on breakpoint\n");
-			}
-
-			uint64_t new_val = ptrace(PTRACE_PEEKDATA, pid, (void *)var_addr, NULL);
-			printf("Variable %s in %s @ 0x%lx; %ld\n", var->name, func->name, var_addr, new_val);
+		}
+		if (scope_block == NULL) {
+			goto loop_end;
 		}
 
+		// Find nearest named parent scope based on RIP
+		Block *framed_scope = NULL;
+		if (scope_block->name == NULL) {
+			for (int i = blk_len - 1; i >= 0; i--) {
+				Block *blk = &block_table[i];
+				if (blk->frame_base_expr_len && blk->name != NULL && (regs.rip >= blk->low_pc) && (regs.rip <= (blk->low_pc + blk->high_pc))) {
+					framed_scope = blk;
+					break;
+				}
+			}
+			if (framed_scope == NULL) {
+				goto loop_end;
+			}
+		} else {
+			framed_scope = scope_block;
+		}
+
+		// Find variable in scope by descending tree from scope_block (can pass into other scopes)
+		Block *var_block = NULL;
+		for (; blk_idx < blk_len; blk_idx++) {
+			Block *blk = &block_table[blk_idx];
+			if (blk->name && strcmp(blk->name, break_name) == 0) {
+				var_block = blk;
+				break;
+			}
+		}
+		if (var_block == NULL) {
+			goto loop_end;
+		}
+
+		// Walk parent_idx to confirm that variable obtained in last pass belongs to current scope
+		Block *tmp_var_block = var_block;
+		for (;;) {
+			if (scope_block->idx == tmp_var_block->idx) {
+				break;
+			}
+
+			if (!tmp_var_block->parent_idx) {
+				printf("hit scope max, %s\n", tmp_var_block->name);
+				goto loop_end;
+			}
+
+			int var_block_idx = tmp_var_block->parent_idx;
+			if (!var_block_idx) {
+				panic("Unable to lookup parent of entry!\n");
+			}
+
+			tmp_var_block = &block_table[var_block_idx];
+		}
+
+		printf("Found variable %s in %s\n", var_block->name, framed_scope->name);
+
+		// Start evaluating variable location expression using framed scope as reference
+		printf("RIP: %llx, LOW: %lx, HIGH: %lx\n", regs.rip, framed_scope->low_pc, framed_scope->low_pc + framed_scope->high_pc);
+		DWExprMachine em = {0};
+		em.frame_holder = framed_scope;
+		DWExpression ex = { .expr = var_block->loc_expr, .len = var_block->loc_expr_len };
+		eval_expr(&regs, &em, ex, 0);
+
+		uint64_t var_addr = em.val_stack[0];
+		uint64_t val = ptrace(PTRACE_PEEKDATA, pid, (void *)var_addr, NULL);
+		printf("Variable %s in %s @ 0x%lx; %ld\n", var_block->name, framed_scope->name, var_addr, val);
+		for (int i = 0; i < em.val_stack_len; i++) {
+			printf("val in stack: 0x%lx\n", em.val_stack[i]);
+		}
+
+		printf("Function %s in CU %lu\n", framed_scope->name, framed_scope->cu_idx);
+
+		Block *type_blk = NULL;
+		for (int i = 0; i < blk_len; i++) {
+			if (block_table[i].au_offset == var_block->type_offset) {
+				type_blk = &block_table[i];
+				break;
+			}
+		}
+		if (!type_blk) {
+			panic("Unable to find type block for function %s\n", framed_scope->name);
+		}
+
+		AbbrevUnit type_au = abbrev_entries[type_blk->au_idx];
+
+		int type_width = 0;
+		int i = type_blk->au_offset;
+		for (int j = 0; j < (type_blk->attr_count * 2); j += 2) {
+			uint8_t attr_name = type_blk->attr_buf[j];
+			//uint8_t attr_form = type_blk->attr_buf[j + 1];
+
+			DWResult ret = parse_data(&type_au, &sections, i + 1, j);
+			switch (attr_name) {
+				case DW_AT_name: {
+					printf("Type is %s\n", ret.data.str);
+				} break;
+				case DW_AT_encoding: {
+					printf("Encoding is %lu\n", ret.data.val);
+				} break;
+				case DW_AT_byte_size: {
+					printf("Byte size is %lu\n", ret.data.val);
+					type_width = ret.data.val;
+				} break;
+			}
+
+			i += ret.skip;
+		}
+
+		int is_8b_aligned = (var_addr & 0x7) == 0;
+		int is_4b_aligned = (var_addr & 0x3) == 0;
+		int is_2b_aligned = (var_addr & 0x1) == 0;
+
+		if (!(is_8b_aligned || is_4b_aligned || is_2b_aligned || type_width == 1)) {
+			panic("Unable to handle unaligned watchpoints!\n");
+		}
+
+		char width_bits = 0;
+		if (type_width == 8) { width_bits = 0b11; }
+		else if (type_width == 4) { width_bits = 0b10; }
+		else if (type_width == 2) { width_bits = 0b01; }
+		else if (type_width == 1) { width_bits = 0b00; }
+
+		// trap with breakpoint 0, R/W
+		uint64_t dr7 = 0b00000000000000110000000000000001;
+		dr7 |= (width_bits << 18);
+
+		ptrace(PTRACE_POKEUSER, pid, (void *)offsetof(struct user, u_debugreg[0]), (void *)var_addr);
+		ptrace(PTRACE_POKEUSER, pid, (void *)offsetof(struct user, u_debugreg[7]), (void *)dr7);
+		ptrace(PTRACE_CONT, pid, NULL, NULL);
+
+		int status;
+		wait(&status);
+		if (!WIFSTOPPED(status)) {
+			panic("Failure to break on breakpoint\n");
+		}
+
+		uint64_t new_val = ptrace(PTRACE_PEEKDATA, pid, (void *)var_addr, NULL);
+		printf("CHANGE DETECTED: Variable %s in %s @ 0x%lx; %ld\n", var_block->name, framed_scope->name, var_addr, new_val);
+
+loop_end:
 		usleep(500000);
 	}
 }

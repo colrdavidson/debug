@@ -1,13 +1,18 @@
-#include <stdio.h>
-
 void super(int *);
 
 int main(void) {
-	printf("Hello World!\n");
 
-	int ret = 2;
+	int ret = 0;
+	int ret2 = 0;
 
 	super(&ret);
 
-	return ret;
+	{
+		int ret = 5;
+		super(&ret);
+
+		ret2 = ret;
+	}
+
+	return ret + ret2;
 }
