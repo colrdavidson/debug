@@ -90,7 +90,6 @@ typedef struct {
 	uint64_t idx;
 	uint64_t parent_idx;
 	uint64_t cu_idx;
-	uint64_t au_idx;
 
 	uint8_t *attr_buf;
 	int      attr_count;
@@ -590,9 +589,9 @@ typedef struct {
 	int debug_abbrev_size;
 } DWSections;
 
-DWResult parse_data(AbbrevUnit *entry, DWSections *sections, int data_idx, int attr_idx) {
-	uint8_t attr_name = entry->attr_buf[attr_idx];
-	uint8_t attr_form = entry->attr_buf[attr_idx + 1];
+DWResult parse_data(DWSections *sections, int data_idx, uint8_t *attr_buf, int attr_idx) {
+	uint8_t attr_name = attr_buf[attr_idx];
+	uint8_t attr_form = attr_buf[attr_idx + 1];
 	uint8_t *debug_info_ptr = sections->debug_info + data_idx;
 
 	DWResult ret = {0};
@@ -967,7 +966,6 @@ int main(int argc, char **argv) {
 			blk->attr_buf = entry->attr_buf;
 			blk->attr_count = entry->attr_count;
 			blk->cu_idx = cur_cu_idx;
-			blk->au_idx = cur_au;
 
 			if (entry->has_children) {
 				child_level++;
@@ -990,7 +988,7 @@ int main(int argc, char **argv) {
 				uint8_t attr_form = entry->attr_buf[j + 1];
 
 				printf("<0x%x> (0x%02x) %-18s (0x%02x) %s\n", i, attr_name, dwarf_attr_name_to_str(attr_name), attr_form, dwarf_attr_form_to_str(attr_form));
-				DWResult ret = parse_data(entry, &sections, i, j);
+				DWResult ret = parse_data(&sections, i, entry->attr_buf, j);
 
 				switch (attr_name) {
 					case DW_AT_frame_base: {
@@ -1520,15 +1518,13 @@ int main(int argc, char **argv) {
 			panic("Unable to find type block for function %s\n", framed_scope->name);
 		}
 
-		AbbrevUnit type_au = abbrev_entries[type_blk->au_idx];
-
 		int type_width = 0;
 		int i = type_blk->au_offset;
 		for (int j = 0; j < (type_blk->attr_count * 2); j += 2) {
 			uint8_t attr_name = type_blk->attr_buf[j];
 			//uint8_t attr_form = type_blk->attr_buf[j + 1];
 
-			DWResult ret = parse_data(&type_au, &sections, i + 1, j);
+			DWResult ret = parse_data(&sections, i + 1, type_blk->attr_buf, j);
 			switch (attr_name) {
 				case DW_AT_name: {
 					printf("Type is %s\n", ret.data.str);
