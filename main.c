@@ -86,6 +86,7 @@ typedef struct {
 
 typedef struct {
 	uint8_t  has_children;
+	int depth;
 
 	uint64_t parent_idx;
 	uint64_t cu_idx;
@@ -691,7 +692,7 @@ typedef struct {
 	uint64_t data;
 } DWStackVal;
 
-#define VAL_STACK_MAX 1024
+#define VAL_STACK_MAX 32
 typedef struct {
 	uint64_t val_stack[VAL_STACK_MAX];
 	uint64_t val_stack_len;
@@ -703,7 +704,6 @@ void eval_expr(struct user_regs_struct *regs, DWExprMachine *em, DWExpression in
 	for (uint64_t i = 0; i < in_ex.len; i++) {
 		uint8_t op = in_ex.expr[i];
 
-		printf("[%d] 0x%x %d %s", depth, op, op - 0x50, dwarf_expr_op_to_str(op));
 		if (op >= 0x50 && op <= 0x6f) {
 			em->val_stack[em->val_stack_len++] = get_regval_for_dwarf_reg(regs, op - 0x50);
 		} else {
@@ -711,13 +711,11 @@ void eval_expr(struct user_regs_struct *regs, DWExprMachine *em, DWExpression in
 				case DW_OP_fbreg: {
 					uint32_t leb_size = 0;
 					int64_t data = get_leb128_i(in_ex.expr + i + 1, &leb_size);
-					printf(" %ld\n", data);
 
 					DWExpression frame_holder_ex = { em->frame_holder->frame_base_expr, em->frame_holder->frame_base_expr_len };
 					eval_expr(regs, em, frame_holder_ex, depth + 1);
 
 					em->val_stack_len--;
-					printf("address: 0x%lx, len: %lu, data: %ld\n", em->val_stack[em->val_stack_len], em->val_stack_len, data);
 					em->val_stack[em->val_stack_len] = ((int64_t)em->val_stack[em->val_stack_len]) + data;
 
 					i += leb_size;
@@ -727,7 +725,6 @@ void eval_expr(struct user_regs_struct *regs, DWExprMachine *em, DWExpression in
 				}
 			}
 		}
-		printf("\n");
 	}
 }
 
@@ -943,6 +940,7 @@ void build_block_table(DWSections *sections, Block **ext_block_table, uint64_t *
 			blk->attr_buf = entry->attr_buf;
 			blk->attr_count = entry->attr_count;
 			blk->cu_idx = cur_cu_idx;
+			blk->depth = child_level;
 
 			for (int j = 0; j < (entry->attr_count * 2); j += 2) {
 				uint8_t attr_name = entry->attr_buf[j];
@@ -1222,6 +1220,38 @@ void print_line_table(CULineTable *line_tables, uint64_t line_tables_len) {
 	}
 }
 
+void print_block_table(Block *block_table, uint64_t block_len) {
+	for (uint64_t i = 0; i < block_len; i++) {
+		Block *block = &block_table[i];
+		int indent_width = block->depth * 4;
+		printf("%*c<0x%lx> [%lu] %s\n", indent_width, ' ', block->au_offset, i, dwarf_tag_to_str(block->type));
+
+		if (block->name) {
+			printf("%*c- name: %s\n", indent_width, ' ',  block->name);
+		}
+		if (block->low_pc && block->high_pc) {
+			printf("%*c- range: 0x%lx - 0x%lx\n", indent_width, ' ',  block->low_pc, block->high_pc + block->low_pc);
+		}
+		if (block->frame_base_expr && block->frame_base_expr_len) {
+			printf("%*c- frame base expr: ", indent_width, ' ');
+			for (int j = 0; j < block->frame_base_expr_len; j++) {
+				printf("%x ", block->frame_base_expr[j]);
+			}
+			printf("\n");
+		}
+		if (block->loc_expr && block->loc_expr_len) {
+			printf("%*c- location expr: ", indent_width, ' ');
+			for (int j = 0; j < block->loc_expr_len; j++) {
+				printf("%x ", block->loc_expr[j]);
+			}
+			printf("\n");
+		}
+		if (block->type_offset) {
+			printf("%*c- type offset: <0x%lx>\n", indent_width, ' ', block->type_offset);
+		}
+	}
+}
+
 uint64_t find_line_addr_in_file(CULineTable *line_tables, uint64_t line_tables_len, char *break_file, uint32_t break_line) {
 	uint64_t break_addr = ~0;
 
@@ -1256,7 +1286,7 @@ uint64_t find_line_addr_in_file(CULineTable *line_tables, uint64_t line_tables_l
 	return break_addr;
 }
 
-uint64_t find_function_addr(Block *block_table, uint64_t block_len, char *func_name) {
+uint64_t find_function_frame_addr(Block *block_table, uint64_t block_len, char *func_name) {
 	uint64_t break_addr = ~0;
 
 	for (uint64_t i = 0; i < block_len; i++) {
@@ -1268,6 +1298,60 @@ uint64_t find_function_addr(Block *block_table, uint64_t block_len, char *func_n
 	}
 	if (break_addr == (uint64_t)~0) {
 		panic("Failed to find the address for function %s\n", func_name);
+	}
+
+	return break_addr;
+}
+
+// This does some work to try to skip the function frame preamble, so variable lookup works properly
+uint64_t find_function_addr(Block *block_table, uint64_t block_len, CULineTable *line_tables, uint64_t line_tables_len, char *func_name) {
+	Block *func_block = NULL;
+	for (uint64_t i = 0; i < block_len; i++) {
+		Block *block = &block_table[i];
+		if (block->type == DW_TAG_subprogram && block->name && strcmp(block->name, func_name) == 0) {
+			func_block = block;
+			break;
+		}
+	}
+	if (!func_block) {
+		panic("Failed to find the address for function %s\n", func_name);
+	}
+
+	Block *cu_block = &block_table[func_block->cu_idx];
+
+	uint64_t break_addr = ~0;
+	for (uint64_t i = 0; i < line_tables_len; i++) {
+		CULineTable *line_table = &line_tables[i];
+		int j;
+
+		uint32_t break_file_idx = 0;
+		for (j = 1; j < line_table->file_count; j++) {
+			if (!(strcmp(line_table->filenames[j], cu_block->name))) {
+				break_file_idx = j;
+				break;
+			}
+		}
+		if (j == line_table->file_count) {
+			continue;
+		}
+
+		for (int j = 0; j < line_table->line_count - 1; j++) {
+			LineMachine line = line_table->lines[j];
+			LineMachine next_line = line_table->lines[j+1];
+
+			if (break_file_idx == line.file_idx && line.address >= func_block->low_pc) {
+				if (next_line.file_idx == break_file_idx) {
+					break_addr = next_line.address;
+				} else {
+					break_addr = line.address;
+				}
+				break;
+			}
+		}
+		break;
+	}
+	if (break_addr == (uint64_t)~0) {
+		panic("Failed to find postamble address for func %s\n", func_block->name);
 	}
 
 	return break_addr;
@@ -1290,8 +1374,13 @@ int main(int argc, char **argv) {
 	uint64_t line_tables_len = 0;
 	build_line_tables(&sections, &line_tables, &line_tables_len);
 
-	uint64_t break_addr = find_function_addr(block_table, blk_len, "main");
-	printf("Found a breakpoint address: 0x%lx!\n", break_addr);
+	print_block_table(block_table, blk_len);
+
+	char *func_name = "main";
+	uint64_t break_addr = find_function_addr(block_table, blk_len, line_tables, line_tables_len, func_name);
+	printf("Found a breakpoint address for function %s: 0x%lx!\n", func_name, break_addr);
+
+	char *break_name = "foo";
 
 	// Attempt to debug program
 	int pid = fork();
@@ -1323,6 +1412,7 @@ int main(int argc, char **argv) {
 	uint64_t trap_rip_cache = break_addr;
 	for (;;) {
 		ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+		printf("PRE-STEP RIP: %llx\n", regs.rip);
 		uint64_t trap_inst = ptrace(PTRACE_PEEKDATA, pid, (void *)regs.rip - 1, NULL);
 		uint64_t cur_inst = ptrace(PTRACE_PEEKDATA, pid, (void *)regs.rip, NULL);
 
@@ -1364,7 +1454,7 @@ int main(int argc, char **argv) {
 		uint64_t debug_1 = ptrace(PTRACE_PEEKUSER, pid, (void *)offsetof(struct user, u_debugreg[0]), NULL);
 		uint64_t stack_top = ptrace(PTRACE_PEEKDATA, pid, (void *)regs.rsp, NULL);
 
-		printf("RIP: %llx\n", regs.rip);
+		printf("POST-STEP RIP: %llx | RSP: %llx\n", regs.rip, regs.rsp);
 /*
 		printf("RAX: %llx\n", regs.rax);
 		printf("RBX: %llx\n", regs.rbx);
@@ -1392,7 +1482,6 @@ int main(int argc, char **argv) {
 		printf("Current Inst: 0x%lx\n", cur_inst);
 		printf("Top of stack: 0x%lx\n", stack_top);
 		printf("debug 1: %lx\n", debug_1);
-		printf("\n");
 */
 
 /*
@@ -1406,12 +1495,11 @@ int main(int argc, char **argv) {
  *   			<undefined>
  *   			var_block -- contains location expr
  */
-		char *break_name = "fizz";
 
 		// Find current scope based on RIP
 		uint64_t blk_idx = blk_len - 1;
 		Block *scope_block = NULL;
-		for (; blk_idx >= 0; blk_idx--) {
+		for (; blk_idx > 0; blk_idx--) {
 			Block *blk = &block_table[blk_idx];
 			if ((regs.rip >= blk->low_pc) && (regs.rip <= (blk->low_pc + blk->high_pc))) {
 				scope_block = blk;
@@ -1423,55 +1511,61 @@ int main(int argc, char **argv) {
 		}
 		uint64_t scope_idx = blk_idx;
 
-		// Find nearest parent scope with frame_base_expr based on RIP
-		Block *framed_scope = NULL;
-		if (scope_block->name == NULL) {
-			for (int i = blk_len - 1; i >= 0; i--) {
-				Block *blk = &block_table[i];
+		uint64_t framed_scope_idx = 0;
 
-				if (blk->frame_base_expr_len && blk->name != NULL && (regs.rip >= blk->low_pc) && (regs.rip <= (blk->low_pc + blk->high_pc))) {
-					framed_scope = blk;
+		// Find parent scope with frame_base_expr
+		Block *framed_scope = NULL;
+		if (scope_block->frame_base_expr) {
+			framed_scope = scope_block;
+		} else {
+			Block *tmp_scope_block = scope_block;
+			uint64_t tmp_scope_block_idx = blk_idx;
+			for (;;) {
+				if (tmp_scope_block->parent_idx == tmp_scope_block_idx) {
+					panic("parent == child, hotlooping\n");
+				}
+
+				if (tmp_scope_block->frame_base_expr) {
+					framed_scope = tmp_scope_block;
+					framed_scope_idx = tmp_scope_block_idx;
 					break;
 				}
-			}
-			if (framed_scope == NULL) {
-				goto loop_end;
-			}
-		} else {
-			framed_scope = scope_block;
-		}
 
-		printf("framed scope range: 0x%lx <0x%llx> 0x%lx\n", framed_scope->low_pc, regs.rip, framed_scope->low_pc + framed_scope->high_pc);
-		printf("lexical scope range: 0x%lx <0x%llx> 0x%lx\n", scope_block->low_pc, regs.rip, scope_block->low_pc + scope_block->high_pc);
-		{
-			DWExprMachine em = {0};
-			em.frame_holder = framed_scope;
-			DWExpression ex = { .expr = framed_scope->frame_base_expr, .len = framed_scope->frame_base_expr_len };
-			eval_expr(&regs, &em, ex, 0);
-			uint64_t frame_base = em.val_stack[0];
-			printf("framed scope frame base: 0x%lx\n", frame_base);
+				tmp_scope_block_idx = tmp_scope_block->parent_idx;
+				tmp_scope_block = &block_table[tmp_scope_block_idx];
+			}
 		}
 
 		// Find variable in scope by descending tree from scope_block (can pass into other scopes)
 		Block *var_block = NULL;
 		for (; blk_idx < blk_len; blk_idx++) {
 			Block *blk = &block_table[blk_idx];
-			printf("%lu | %s\n", blk_idx, blk->name);
 			if (blk->name && strcmp(blk->name, break_name) == 0) {
 				var_block = blk;
 				break;
 			}
 		}
 		if (var_block == NULL) {
-			goto loop_end;
+
+			// Try using the framed scope idx instead if we couldn't find it in the lexical scope
+			blk_idx = framed_scope_idx;
+			for (; blk_idx < blk_len; blk_idx++) {
+				Block *blk = &block_table[blk_idx];
+				if (blk->name && strcmp(blk->name, break_name) == 0) {
+					var_block = blk;
+					break;
+				}
+			}
+			if (var_block == NULL) {
+				goto loop_end;
+			}
 		}
 
 		// Walk parent_idx to confirm that variable obtained in last pass belongs to current scope
 		Block *tmp_var_block = var_block;
 		uint64_t tmp_var_block_idx = blk_idx;
 		for (;;) {
-			printf("-- %lu | %s\n", tmp_var_block_idx, tmp_var_block->name);
-			if (scope_idx == tmp_var_block_idx) {
+			if (scope_idx == tmp_var_block_idx || framed_scope_idx == tmp_var_block_idx) {
 				break;
 			}
 
@@ -1492,10 +1586,7 @@ int main(int argc, char **argv) {
 			tmp_var_block = &block_table[tmp_var_block_idx];
 		}
 
-		printf("Found variable %s in %s\n", var_block->name, framed_scope->name);
-
 		// Start evaluating variable location expression using framed scope as reference
-		printf("framed scope: %lx <%llx> %lx\n", framed_scope->low_pc, regs.rip, framed_scope->low_pc + framed_scope->high_pc);
 		DWExprMachine em = {0};
 		em.frame_holder = framed_scope;
 		DWExpression ex = { .expr = var_block->loc_expr, .len = var_block->loc_expr_len };
@@ -1503,12 +1594,11 @@ int main(int argc, char **argv) {
 
 		uint64_t var_addr = em.val_stack[0];
 		uint64_t val = ptrace(PTRACE_PEEKDATA, pid, (void *)var_addr, NULL);
+
 		printf("Variable %s in %s @ 0x%lx; %ld\n", var_block->name, framed_scope->name, var_addr, val);
 		for (uint64_t i = 0; i < em.val_stack_len; i++) {
 			printf("val in stack: 0x%lx\n", em.val_stack[i]);
 		}
-
-		printf("Function %s in CU %lu\n", framed_scope->name, framed_scope->cu_idx);
 
 		// Determine type of variable
 		Block *type_blk = NULL;
@@ -1522,8 +1612,6 @@ int main(int argc, char **argv) {
 			panic("Unable to find type block for variable %s\n", var_block->name);
 		}
 
-		printf("current type is %s\n", dwarf_tag_to_str(var_block->type));
-
 		int type_width = 0;
 		int i = type_blk->au_offset;
 		for (int j = 0; j < (type_blk->attr_count * 2); j += 2) {
@@ -1531,14 +1619,7 @@ int main(int argc, char **argv) {
 
 			DWResult ret = parse_data(&sections, i + 1, type_blk->attr_buf, j);
 			switch (attr_name) {
-				case DW_AT_name: {
-					printf("Type is %s\n", ret.data.str);
-				} break;
-				case DW_AT_encoding: {
-					printf("Encoding is %lu\n", ret.data.val);
-				} break;
 				case DW_AT_byte_size: {
-					printf("Byte size is %lu\n", ret.data.val);
 					type_width = ret.data.val;
 				} break;
 			}
