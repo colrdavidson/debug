@@ -1,4 +1,3 @@
+*.swp
+*.swo
 debugger
-dummy/dummy
-dummy/simple
-gui

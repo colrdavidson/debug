@@ -87,7 +87,6 @@ typedef struct {
 typedef struct {
 	uint8_t  has_children;
 
-	uint64_t idx;
 	uint64_t parent_idx;
 	uint64_t cu_idx;
 
@@ -179,6 +178,7 @@ enum {
 	X(DW_TAG_subprogram, 0x2e) \
 	X(DW_TAG_base_type, 0x24) \
 	X(DW_TAG_variable, 0x34) \
+	X(DW_TAG_program, 0xFF) \
 
 #define DWARF_AT \
 	X(DW_AT_location, 0x02) \
@@ -279,8 +279,9 @@ enum { DWARF_OP };
 
 // GLOBALS
 
-uint32_t break_line = 5;
-char *break_file = "dummy.c";
+#define BLOCK_MAX 1024
+#define LINE_TABLES_MAX 20
+
 
 uint64_t get_regval_for_dwarf_reg(struct user_regs_struct *regs, uint8_t idx) {
 	switch (idx) {
@@ -500,9 +501,7 @@ static uint64_t inject_breakpoint_at_addr(int pid, uint64_t addr) {
 	uint64_t orig_data = (uint64_t)ptrace(PTRACE_PEEKDATA, pid, (void *)addr, NULL);
 
 	// Replace first byte of code at address with int 3
-	printf("data: %lx\n", orig_data);
 	uint64_t data_with_trap = (orig_data & (~0xFF)) | 0xCC;
-	printf("trap data: %lx\n", data_with_trap);
 	ptrace(PTRACE_POKEDATA, pid, (void *)addr, (void *)data_with_trap);
 
 	return orig_data;
@@ -579,6 +578,10 @@ typedef struct {
 } DWResult;
 
 typedef struct {
+	uint8_t *file_buffer;
+	char *bin_name;
+	char cur_dir[PATH_MAX + 1];
+
 	uint8_t *debug_info;
 	int debug_info_size;
 	uint8_t *debug_line;
@@ -691,7 +694,7 @@ typedef struct {
 #define VAL_STACK_MAX 1024
 typedef struct {
 	uint64_t val_stack[VAL_STACK_MAX];
-	int val_stack_len;
+	uint64_t val_stack_len;
 
 	Block *frame_holder;
 } DWExprMachine;
@@ -700,7 +703,7 @@ void eval_expr(struct user_regs_struct *regs, DWExprMachine *em, DWExpression in
 	for (uint64_t i = 0; i < in_ex.len; i++) {
 		uint8_t op = in_ex.expr[i];
 
-		printf("[%d] 0x%x %s\n", depth, op, dwarf_expr_op_to_str(op));
+		printf("[%d] 0x%x %d %s", depth, op, op - 0x50, dwarf_expr_op_to_str(op));
 		if (op >= 0x50 && op <= 0x6f) {
 			em->val_stack[em->val_stack_len++] = get_regval_for_dwarf_reg(regs, op - 0x50);
 		} else {
@@ -708,42 +711,40 @@ void eval_expr(struct user_regs_struct *regs, DWExprMachine *em, DWExpression in
 				case DW_OP_fbreg: {
 					uint32_t leb_size = 0;
 					int64_t data = get_leb128_i(in_ex.expr + i + 1, &leb_size);
+					printf(" %ld\n", data);
 
 					DWExpression frame_holder_ex = { em->frame_holder->frame_base_expr, em->frame_holder->frame_base_expr_len };
 					eval_expr(regs, em, frame_holder_ex, depth + 1);
 
 					em->val_stack_len--;
+					printf("address: 0x%lx, len: %lu, data: %ld\n", em->val_stack[em->val_stack_len], em->val_stack_len, data);
 					em->val_stack[em->val_stack_len] = ((int64_t)em->val_stack[em->val_stack_len]) + data;
 
 					i += leb_size;
 				} break;
 				default: {
-					panic("Unhandled op 0x%x, %s!\n", op, dwarf_expr_op_to_str(op));
+					panic("\nUnhandled op 0x%x, %s!\n", op, dwarf_expr_op_to_str(op));
 				}
 			}
 		}
+		printf("\n");
 	}
 }
 
-int main(int argc, char **argv) {
-	if (argc < 2) {
-		panic("Please provide the debugger a program to debug!\n");
-	}
-
-	char cur_dir[PATH_MAX + 1];
-	if (getcwd(cur_dir, sizeof(cur_dir)) == NULL) {
+void load_elf_sections(DWSections *sections, char *file_path) {
+	if (getcwd(sections->cur_dir, sizeof(sections->cur_dir)) == NULL) {
 		panic("Failed to get current dir!\n");
 	}
 
-	char *bin_name = malloc(PATH_MAX + 1);
-	bin_name[PATH_MAX] = '\0';
+	sections->bin_name = malloc(PATH_MAX + 1);
+	sections->bin_name[PATH_MAX] = '\0';
 
-	int fd = open_binary(argv[1], &bin_name);
+	int fd = open_binary(file_path, &sections->bin_name);
 	if (fd < 0) {
-		panic("Failed to open program %s\n", argv[1]);
+		panic("Failed to open program %s\n", file_path);
 	}
 
-	printf("Debugging %s\n", bin_name);
+	printf("Debugging %s\n", sections->bin_name);
 
 	off_t f_end = lseek(fd, 0, SEEK_END);
 	if (f_end < 0) {
@@ -752,15 +753,16 @@ int main(int argc, char **argv) {
 	lseek(fd, 0, SEEK_SET);
 
 	uint64_t size = (uint64_t)f_end;
-	uint8_t *buffer = malloc(size);
-	ssize_t ret = read(fd, buffer, size);
+	sections->file_buffer = malloc(size);
+
+	ssize_t ret = read(fd, sections->file_buffer, size);
 	if (ret < 0 || (uint64_t)ret != size) {
-		panic("Failed to read %s\n", bin_name);
+		panic("Failed to read %s\n", sections->bin_name);
 	}
 	close(fd);
 
 	// Ensure that the file is an executable program
-	Elf64_Ehdr *elf_hdr = (Elf64_Ehdr *)buffer;
+	Elf64_Ehdr *elf_hdr = (Elf64_Ehdr *)sections->file_buffer;
 	if (!(elf_hdr->e_ident[0] == 0x7f &&
 		  elf_hdr->e_ident[1] == 'E'  &&
 		  elf_hdr->e_ident[2] == 'L'  &&
@@ -787,38 +789,17 @@ int main(int argc, char **argv) {
 		panic("TODO This debugger requires symbols to be able to debug the file\n");
 	}
 
-	printf("ELF entry location:            %lu\n", elf_hdr->e_entry);
-	printf("ELF header size:               %d\n",  elf_hdr->e_ehsize);
-	printf("ELF program header entry size: %d\n",  elf_hdr->e_phentsize);
-	printf("ELF program header offset:     %lu\n", elf_hdr->e_phoff);
-	printf("ELF program header entries:    %d\n",  elf_hdr->e_phnum);
-	printf("ELF program header size:       %d\n",  elf_hdr->e_phentsize * elf_hdr->e_phnum);
-	printf("ELF section header entry size: %d\n",  elf_hdr->e_shentsize);
-	printf("ELF section header offset:     %lu\n", elf_hdr->e_shoff);
-	printf("ELF section header entries:    %d\n",  elf_hdr->e_shnum);
-	printf("ELF section header size:       %d\n",  elf_hdr->e_shentsize * elf_hdr->e_shnum);
-
-	uint8_t *sect_hdr_buf = buffer + elf_hdr->e_shoff;
+	uint8_t *sect_hdr_buf = sections->file_buffer + elf_hdr->e_shoff;
 	ELF64_Shdr *strtable_hdr = (ELF64_Shdr *)(sect_hdr_buf + (elf_hdr->e_shstrndx * elf_hdr->e_shentsize));
 	if (strtable_hdr->sh_type != SHT_STRTAB) {
 		panic("Executable string table appears invalid!\n");
 	}
 
-	DWSections sections = {0};
-
-	char *strtable = (char *)(buffer + strtable_hdr->sh_offset);
+	char *strtable = (char *)(sections->file_buffer + strtable_hdr->sh_offset);
 	for (int i = 0; i < elf_hdr->e_shnum; i++) {
 		ELF64_Shdr *sect_hdr = (ELF64_Shdr *)(sect_hdr_buf + (i * elf_hdr->e_shentsize));
 
 		char *section_name = strtable + sect_hdr->sh_name;
-
-/*
-		printf("- Section Name:       %s\n",  section_name);
-		printf("- Section Type:       %u\n",  sect_hdr->sh_type);
-		printf("- Section Size:       %lx\n", sect_hdr->sh_size);
-		printf("- Section Entry Size: %lx\n", sect_hdr->sh_entsize);
-		printf("- Section Offset:     %lx\n", sect_hdr->sh_offset);
-*/
 
 		char dbginfo_str[] = ".debug_info";
 		char dbgabbrev_str[] = ".debug_abbrev";
@@ -826,25 +807,27 @@ int main(int argc, char **argv) {
 		char dbgline_str[] = ".debug_line";
 
 		if (!(strncmp(section_name, dbginfo_str, sizeof(dbginfo_str)))) {
-			sections.debug_info_size = sect_hdr->sh_size;
-			sections.debug_info = buffer + sect_hdr->sh_offset;
+			sections->debug_info_size = sect_hdr->sh_size;
+			sections->debug_info = sections->file_buffer + sect_hdr->sh_offset;
 		} else if (!(strncmp(section_name, dbgabbrev_str, sizeof(dbgabbrev_str)))) {
-			sections.debug_abbrev_size = sect_hdr->sh_size;
-			sections.debug_abbrev = buffer + sect_hdr->sh_offset;
+			sections->debug_abbrev_size = sect_hdr->sh_size;
+			sections->debug_abbrev = sections->file_buffer + sect_hdr->sh_offset;
 		} else if (!(strncmp(section_name, dbgstr_str, sizeof(dbgstr_str)))) {
-			sections.debug_str_size = sect_hdr->sh_size;
-			sections.debug_str = buffer + sect_hdr->sh_offset;
+			sections->debug_str_size = sect_hdr->sh_size;
+			sections->debug_str = sections->file_buffer + sect_hdr->sh_offset;
 		} else if (!(strncmp(section_name, dbgline_str, sizeof(dbgline_str)))) {
-			sections.debug_line_size = sect_hdr->sh_size;
-			sections.debug_line = buffer + sect_hdr->sh_offset;
+			sections->debug_line_size = sect_hdr->sh_size;
+			sections->debug_line = sections->file_buffer + sect_hdr->sh_offset;
 		}
 	}
 
-	if (!(sections.debug_info && sections.debug_abbrev && sections.debug_line)) {
+	if (!(sections->debug_info && sections->debug_abbrev && sections->debug_line)) {
 		panic("TODO Currently this debugger only supports binaries with debug symbols!\n");
 	}
+}
 
-	printf("Building the abbreviation table\n");
+void build_block_table(DWSections *sections, Block **ext_block_table, uint64_t *blk_len) {
+	Block *block_table = *ext_block_table;
 
 	#define ABBREV_MAX 1024
 	int abbrev_len = 0;
@@ -852,9 +835,9 @@ int main(int argc, char **argv) {
 	uint64_t cu_idx = 0;
 
 	int i = 0;
-	while (i < sections.debug_abbrev_size) {
+	while (i < sections->debug_abbrev_size) {
 		uint32_t leb_size = 0;
-		uint64_t abbrev_code = get_leb128_u(sections.debug_abbrev + i, &leb_size);
+		uint64_t abbrev_code = get_leb128_u(sections->debug_abbrev + i, &leb_size);
 
 		i += leb_size;
 		if (abbrev_code == 0) {
@@ -871,18 +854,18 @@ int main(int argc, char **argv) {
 		entry->cu_idx = cu_idx;
 
 		leb_size = 0;
-		entry->type = get_leb128_u(sections.debug_abbrev + i, &leb_size);
+		entry->type = get_leb128_u(sections->debug_abbrev + i, &leb_size);
 		i += leb_size;
 
-		entry->has_children = sections.debug_abbrev[i];
+		entry->has_children = sections->debug_abbrev[i];
 		i += 1;
 
-		entry->attr_buf = sections.debug_abbrev + i;
+		entry->attr_buf = sections->debug_abbrev + i;
 
 		int attr_count = 0;
-		while (i < sections.debug_abbrev_size) {
-			uint8_t attr_name = sections.debug_abbrev[i + 0];
-			uint8_t attr_form = sections.debug_abbrev[i + 1];
+		while (i < sections->debug_abbrev_size) {
+			uint8_t attr_name = sections->debug_abbrev[i + 0];
+			uint8_t attr_form = sections->debug_abbrev[i + 1];
 
 			i += 2;
 			if (attr_name == 0 && attr_form == 0) {
@@ -895,48 +878,49 @@ int main(int argc, char **argv) {
 		entry->attr_count = attr_count;
 	}
 
-	print_abbrev_table(abbrev_entries, abbrev_len);
-
-	printf("\n");
-	printf("Parsing .debug_info\n");
-
 	#define BLOCK_STACK_MAX 20
-	int entry_stack[BLOCK_STACK_MAX] = {0};
+	uint64_t entry_stack[BLOCK_STACK_MAX] = {0};
 
-	#define BLOCK_MAX 1024
-	Block block_table[BLOCK_MAX] = {0};
 
 	uint64_t cur_cu_count = 0;
 	uint64_t cur_cu_idx = 0;
-	int blk_len = 0;
+	uint64_t cur_cu_off = 0;
+
+	// Reserve block 0 as the full program block
+	block_table[0].type = DW_TAG_program;
+	block_table[0].name = "Program Top";
+	entry_stack[0] = 0;
+	*blk_len += 1;
 
 	i = 0;
-	while (i < sections.debug_info_size) {
-		DWARF32_CUHdr *cu_hdr = (DWARF32_CUHdr *)(sections.debug_info + i);
+	while (i < sections->debug_info_size) {
+		DWARF32_CUHdr *cu_hdr = (DWARF32_CUHdr *)(sections->debug_info + i);
 
-		if ((*(uint32_t *)sections.debug_info) == 0xFFFFFFFF) {
+		if ((*(uint32_t *)sections->debug_info) == 0xFFFFFFFF) {
 			panic("TODO Currently this debugger only handles 32 bit DWARF!\n");
 		}
-
-		printf("CU size: %x\n", cu_hdr->unit_length);
-		printf("DWARF version: %d\n", cu_hdr->version);
-		printf("debug entry abbrev offset: %x\n", cu_hdr->debug_abbrev_offset);
-		printf("arch address size: %d bytes\n", cu_hdr->address_size);
 
 		if (cu_hdr->version != 4) {
 			panic("TODO This code only supports DWARF 4, got %d!\n", cu_hdr->version);
 		}
 		i += sizeof(DWARF32_CUHdr);
 
-		int child_level = 0;
+		cur_cu_off = i - sizeof(DWARF32_CUHdr);
+		cur_cu_idx = *blk_len;
+
+		uint64_t child_level = 1;
 		do {
 			uint32_t leb_size = 0;
-			uint64_t abbrev_id = get_leb128_u(sections.debug_info + i, &leb_size);
+			uint64_t abbrev_id = get_leb128_u(sections->debug_info + i, &leb_size);
 			i += leb_size;
 
 			if (abbrev_id == 0) {
 				child_level--;
 				continue;
+			}
+
+			if (*blk_len + 1 > BLOCK_MAX) {
+				panic("TODO This should probably be dynamic!\n");
 			}
 
 			AbbrevUnit *entry = NULL;
@@ -952,14 +936,7 @@ int main(int argc, char **argv) {
 				panic("Unable to find abbrev_table entry %lu\n", abbrev_id);
 			}
 
-			
-			if (entry->type == DW_TAG_compile_unit) {
-				cur_cu_idx = blk_len;
-			}
-
-			printf("Abbrev %lu -- %s\n", abbrev_id, dwarf_tag_to_str(entry->type));
-
-			Block *blk = &block_table[blk_len++];
+			Block *blk = &block_table[*blk_len];
 			blk->au_offset = i - 1;
 			blk->has_children = entry->has_children;
 			blk->type = entry->type;
@@ -967,28 +944,10 @@ int main(int argc, char **argv) {
 			blk->attr_count = entry->attr_count;
 			blk->cu_idx = cur_cu_idx;
 
-			if (entry->has_children) {
-				child_level++;
-			}
-
-			printf("setting estack @ %d to %d\n", child_level, blk_len);
-			entry_stack[child_level] = blk_len;
-
-			if (child_level > 0) {
-				int parent_idx = entry_stack[child_level - 1];
-				printf("settng block %d, parent %d\n", blk_len, parent_idx);
-				if (blk_len != parent_idx) {
-					blk->parent_idx = parent_idx;
-				}
-			}
-
-			printf("[0x%lx] Abbrev %d | %lu: (%s) [%s]\n", (uint64_t)blk->au_offset, blk_len, abbrev_id, dwarf_tag_to_str(entry->type), ((entry->has_children) ? "has children" : "no children"));
 			for (int j = 0; j < (entry->attr_count * 2); j += 2) {
 				uint8_t attr_name = entry->attr_buf[j];
-				uint8_t attr_form = entry->attr_buf[j + 1];
 
-				printf("<0x%x> (0x%02x) %-18s (0x%02x) %s\n", i, attr_name, dwarf_attr_name_to_str(attr_name), attr_form, dwarf_attr_form_to_str(attr_form));
-				DWResult ret = parse_data(&sections, i, entry->attr_buf, j);
+				DWResult ret = parse_data(sections, i, entry->attr_buf, j);
 
 				switch (attr_name) {
 					case DW_AT_frame_base: {
@@ -1005,7 +964,7 @@ int main(int argc, char **argv) {
 						blk->name = ret.data.str;
 					} break;
 					case DW_AT_type: {
-						blk->type_offset = (uint32_t)ret.data.val;
+						blk->type_offset = (uint32_t)(ret.data.val + cur_cu_off);
 					} break;
 					case DW_AT_language: {
 						if (ret.data.val != 0x0c) {
@@ -1027,29 +986,39 @@ int main(int argc, char **argv) {
 				i += ret.skip;
 			}
 
-			printf("\n");
-		} while (i < sections.debug_info_size && child_level > 0);
+			entry_stack[child_level] = *blk_len;
+
+			uint64_t parent_idx = entry_stack[child_level - 1];
+			if (entry->has_children) {
+				child_level++;
+			}
+
+			if (*blk_len != parent_idx) {
+				blk->parent_idx = parent_idx;
+			}
+
+			*blk_len += 1;
+		} while (i < sections->debug_info_size && child_level > 1);
 
 		cur_cu_count += 1;
 	}
+}
 
-	#define LINE_TABLES_MAX 20
-	int line_tables_len = 0;
-	CULineTable *line_tables = malloc(sizeof(CULineTable) * LINE_TABLES_MAX);
+void build_line_tables(DWSections *sections, CULineTable **ext_line_table, uint64_t *line_tables_len) {
+	CULineTable *line_tables = *ext_line_table;
 
-	printf("Parsing .debug_line\n");
-	i = 0;
-	while (i < sections.debug_line_size) {
-		DWARF32_LineHdr *line_hdr = (DWARF32_LineHdr *)(sections.debug_line + i);
-		if ((*(uint32_t *)(sections.debug_line + i)) == 0xFFFFFFFF) {
+	int i = 0;
+	while (i < sections->debug_line_size) {
+		DWARF32_LineHdr *line_hdr = (DWARF32_LineHdr *)(sections->debug_line + i);
+		if ((*(uint32_t *)(sections->debug_line + i)) == 0xFFFFFFFF) {
 			panic("TODO Currently this debugger only handles 32 bit DWARF!\n");
 		}
 
-		CULineTable *line_table = &line_tables[line_tables_len];
-		if (line_tables_len + 1 > LINE_TABLES_MAX) {
+		CULineTable *line_table = &line_tables[*line_tables_len];
+		if (*line_tables_len + 1 > LINE_TABLES_MAX) {
 			panic("TODO make the line tables properly stretchy!\n");
 		}
-		line_tables_len++;
+		*line_tables_len += 1;
 
 		if (line_hdr->version != 4) {
 			panic("TODO This code only supports DWARF 4, got %d!\n", line_hdr->version);
@@ -1063,13 +1032,13 @@ int main(int argc, char **argv) {
 		int op_lengths_size = line_hdr->opcode_base - 1;
 		i += op_lengths_size;
 
-		line_table->dirs[0] = cur_dir;
+		line_table->dirs[0] = sections->cur_dir;
 		int dir_count = 1;
-		while (i < sections.debug_line_size) {
-			char *dirname = (char *)(sections.debug_line + i);
+		while (i < sections->debug_line_size) {
+			char *dirname = (char *)(sections->debug_line + i);
 			line_table->dirs[dir_count] = dirname;
 
-			int dirname_length = strnlen(dirname, sections.debug_line_size - i);
+			int dirname_length = strnlen(dirname, sections->debug_line_size - i);
 			i += dirname_length + 1;
 			if (dirname_length == 0) {
 				break;
@@ -1079,25 +1048,25 @@ int main(int argc, char **argv) {
 		}
 
 		int file_count = 1;
-		while (i < sections.debug_line_size) {
-			char *filename = (char *)(sections.debug_line + i);
+		while (i < sections->debug_line_size) {
+			char *filename = (char *)(sections->debug_line + i);
 
-			int filename_length = strnlen(filename, sections.debug_line_size - i);
+			int filename_length = strnlen(filename, sections->debug_line_size - i);
 			i += filename_length + 1;
 			if (filename_length == 0) {
 				break;
 			}
 
 			uint32_t leb_size = 0;
-			uint64_t dir_idx = get_leb128_u(sections.debug_line + i, &leb_size);
+			uint64_t dir_idx = get_leb128_u(sections->debug_line + i, &leb_size);
 			i += leb_size;
 
 			leb_size = 0;
-			get_leb128_u(sections.debug_line + i, &leb_size); // last modified
+			get_leb128_u(sections->debug_line + i, &leb_size); // last modified
 			i += leb_size;
 
 			leb_size = 0;
-			get_leb128_u(sections.debug_line + i, &leb_size); // file size
+			get_leb128_u(sections->debug_line + i, &leb_size); // file size
 			i += leb_size;
 
 			line_table->filenames[file_count] = filename;
@@ -1111,7 +1080,7 @@ int main(int argc, char **argv) {
 
 		line_table->dir_count   = dir_count;
 		line_table->file_count  = file_count;
-		line_table->op_buf      = sections.debug_line + i;
+		line_table->op_buf      = sections->debug_line + i;
 		line_table->op_buf_size = rem_size;
 		line_table->opcode_base = line_hdr->opcode_base;
 		line_table->line_base   = line_hdr->line_base;
@@ -1124,25 +1093,8 @@ int main(int argc, char **argv) {
 		i += rem_size;
 	}
 
-	for (i = 0; i < line_tables_len; i++) {
-		CULineTable line_table = line_tables[i];
-		printf("CU Line Table %d\n", i + 1);
-		printf("Files:\n");
-		for (int j = 0; j < line_table.file_count; j++) {
-			uint8_t dir_idx = line_table.dir_idx[j];
-			char *dirname = line_table.dirs[dir_idx];
-
-			printf("- %s/%s\n", dirname, line_table.filenames[j]);
-		}
-		printf("opcode base: %d\n", line_table.opcode_base);
-		printf("line base: %d\n", line_table.line_base);
-		printf("line range: %d\n", line_table.line_range);
-		printf("default is_stmt: %d\n", line_table.default_is_stmt);
-		printf("\n");
-	}
-
-	printf("Line Ops\n");
-	for (i = 0; i < line_tables_len; i++) {
+	// Process Line Ops
+	for (uint64_t i = 0; i < *line_tables_len; i++) {
 		CULineTable *line_table = &line_tables[i];
 
 		LineMachine lm_state;
@@ -1151,16 +1103,11 @@ int main(int argc, char **argv) {
 		for (uint32_t j = 0; j < line_table->op_buf_size; j++) {
 			uint8_t op_byte = *(line_table->op_buf + j);
 
-			//printf("<xxd-check> %lx\n", ((line_table->op_buf + j) - buffer) & (~0x0F));
-
 			if (op_byte >= line_table->opcode_base) {
 				uint8_t real_op = op_byte - line_table->opcode_base;
 
 				int line_inc = line_table->line_base + (real_op % line_table->line_range);
 				int addr_inc = real_op / line_table->line_range;
-
-				printf("Special Op: (0x%02x), Address: 0x%lx + %d, Line: %u + %d\n",
-					op_byte, lm_state.address, addr_inc, lm_state.line_num, line_inc);
 
 				lm_state.line_num += line_inc;
 				lm_state.address  += addr_inc;
@@ -1178,21 +1125,16 @@ int main(int argc, char **argv) {
 			switch (op_byte) {
 				case 0: { // Extended Opcodes
 
-					// uint8_t op_size = *(line_table->op_buf + j);
 					j += 2;
 					uint8_t real_op = *(line_table->op_buf + j);
 
 					switch (real_op) {
 						case DW_LNE_end_sequence: {
-							printf("%s (0x%02x)\n", dwarf_line_ext_op_to_str(real_op), real_op);
-
 							lm_state.end_sequence = true;
-
 							memcpy(&line_table->lines[line_table->line_count++], &lm_state, sizeof(lm_state));
 						} break;
 						case DW_LNE_set_address: {
 							uint64_t address = *(uint64_t *)(line_table->op_buf + j + 1);
-							printf("%s (0x%02x) 0x%lx\n", dwarf_line_ext_op_to_str(real_op), real_op, address);
 
 							lm_state.address = address;
 							j += sizeof(address);
@@ -1204,8 +1146,6 @@ int main(int argc, char **argv) {
 					}
 				} break;
 				case DW_LNS_copy: {
-					printf("%s (0x%02x)\n", dwarf_line_op_to_str(op_byte), op_byte);
-
 					memcpy(&line_table->lines[line_table->line_count++], &lm_state, sizeof(lm_state));
 
 					lm_state.discriminator  = 0;
@@ -1217,7 +1157,6 @@ int main(int argc, char **argv) {
 					uint32_t leb_size = 0;
 					uint64_t addr_inc = get_leb128_u(line_table->op_buf + j + 1, &leb_size);
 
-					printf("%s (0x%02x) address: 0x%lx + %lu\n", dwarf_line_op_to_str(op_byte), op_byte, lm_state.address, addr_inc);
 					lm_state.address += addr_inc;
 
 					j += leb_size;
@@ -1226,7 +1165,6 @@ int main(int argc, char **argv) {
 					uint32_t leb_size = 0;
 					int64_t line_inc = get_leb128_i(line_table->op_buf + j + 1, &leb_size);
 
-					printf("%s (0x%02x) line: %u + %li\n", dwarf_line_op_to_str(op_byte), op_byte, lm_state.line_num, line_inc);
 					lm_state.line_num += line_inc;
 
 					j += leb_size;
@@ -1235,7 +1173,6 @@ int main(int argc, char **argv) {
 					uint32_t leb_size = 0;
 					uint64_t file_idx = get_leb128_u(line_table->op_buf + j + 1, &leb_size);
 
-					printf("%s (0x%02x) file_idx: %lu\n", dwarf_line_op_to_str(op_byte), op_byte, file_idx);
 					lm_state.file_idx = file_idx;
 
 					j += leb_size;
@@ -1244,24 +1181,18 @@ int main(int argc, char **argv) {
 					uint32_t leb_size = 0;
 					uint64_t col_num = get_leb128_u(line_table->op_buf + j + 1, &leb_size);
 
-					printf("%s (0x%02x) column: %lu\n", dwarf_line_op_to_str(op_byte), op_byte, col_num);
 					lm_state.col_num = col_num;
 
 					j += leb_size;
 				} break;
 				case DW_LNS_negate_stmt: {
-					printf("%s (0x%02x) is_stmt: !%d\n", dwarf_line_op_to_str(op_byte), op_byte, lm_state.is_stmt);
-
 					lm_state.is_stmt = !lm_state.is_stmt;
 				} break;
 				case DW_LNS_const_add_pc: {
 					int addr_inc = (255 - line_table->opcode_base) / line_table->line_range;
-					printf("%s (0x%02x) const: %d\n", dwarf_line_op_to_str(op_byte), op_byte, addr_inc);
-
 					lm_state.address += addr_inc;
 				} break;
 				case DW_LNS_set_prologue_end: {
-					printf("%s (0x%02x) prologue_end = true\n", dwarf_line_op_to_str(op_byte), op_byte);
 					lm_state.prologue_end = true;
 				} break;
 				default: {
@@ -1270,12 +1201,31 @@ int main(int argc, char **argv) {
 			}
 		}
 	}
+}
 
+void print_line_table(CULineTable *line_tables, uint64_t line_tables_len) {
+	for (uint64_t i = 0; i < line_tables_len; i++) {
+		CULineTable line_table = line_tables[i];
+		printf("CU Line Table %lu\n", i + 1);
+		printf("Files:\n");
+		for (int j = 0; j < line_table.file_count; j++) {
+			uint8_t dir_idx = line_table.dir_idx[j];
+			char *dirname = line_table.dirs[dir_idx];
+
+			printf("- %s/%s\n", dirname, line_table.filenames[j]);
+		}
+		printf("opcode base: %d\n", line_table.opcode_base);
+		printf("line base: %d\n", line_table.line_base);
+		printf("line range: %d\n", line_table.line_range);
+		printf("default is_stmt: %d\n", line_table.default_is_stmt);
+		printf("\n");
+	}
+}
+
+uint64_t find_line_addr_in_file(CULineTable *line_tables, uint64_t line_tables_len, char *break_file, uint32_t break_line) {
 	uint64_t break_addr = ~0;
 
-	printf("\nAttempting to break in %s on line %d\n", break_file, break_line);
-
-	for (i = 0; i < line_tables_len; i++) {
+	for (uint64_t i = 0; i < line_tables_len; i++) {
 		CULineTable *line_table = &line_tables[i];
 		int j;
 
@@ -1303,8 +1253,45 @@ int main(int argc, char **argv) {
 		panic("Failed to find the address for line %d\n", break_line);
 	}
 
-	printf("Found a breakpoint address: 0x%lx!\n", break_addr);
+	return break_addr;
+}
 
+uint64_t find_function_addr(Block *block_table, uint64_t block_len, char *func_name) {
+	uint64_t break_addr = ~0;
+
+	for (uint64_t i = 0; i < block_len; i++) {
+		Block *block = &block_table[i];
+		if (block->type == DW_TAG_subprogram && block->name && strcmp(block->name, func_name) == 0) {
+			break_addr = block->low_pc;
+			break;
+		}
+	}
+	if (break_addr == (uint64_t)~0) {
+		panic("Failed to find the address for function %s\n", func_name);
+	}
+
+	return break_addr;
+}
+
+int main(int argc, char **argv) {
+	if (argc < 2) {
+		panic("Please provide the debugger a program to debug!\n");
+	}
+
+	// Set up and load all the relevant debug sections
+	DWSections sections;
+	load_elf_sections(&sections, argv[1]);
+
+	Block *block_table = (Block *)calloc(sizeof(Block), BLOCK_MAX);
+	uint64_t blk_len = 0;
+	build_block_table(&sections, &block_table, &blk_len);
+
+	CULineTable *line_tables = (CULineTable *)malloc(sizeof(CULineTable) * LINE_TABLES_MAX);
+	uint64_t line_tables_len = 0;
+	build_line_tables(&sections, &line_tables, &line_tables_len);
+
+	uint64_t break_addr = find_function_addr(block_table, blk_len, "main");
+	printf("Found a breakpoint address: 0x%lx!\n", break_addr);
 
 	// Attempt to debug program
 	int pid = fork();
@@ -1313,10 +1300,9 @@ int main(int argc, char **argv) {
 
 		// Turn off stack address randomization for more consistent debugging
 		personality(ADDR_NO_RANDOMIZE);
+		execvp(sections.bin_name, argv + 1);
 
-		execvp(bin_name, argv + 1);
-
-		panic("Failed to run program %s\n", bin_name);
+		panic("Failed to run program %s\n", sections.bin_name);
 	} else if (pid < 0) {
 		panic("Failed to fork?\n");
 	}
@@ -1326,8 +1312,6 @@ int main(int argc, char **argv) {
 
 	struct user_regs_struct regs;
 	ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-
-	//ptrace(PTRACE_POKEUSER, pid, (void *)offsetof(struct user, u_debugreg[0]), (void *)0x7fffffffd7a8);
 
 	uint64_t orig_data = inject_breakpoint_at_addr(pid, break_addr);
 	ptrace(PTRACE_CONT, pid, NULL, NULL);
@@ -1422,10 +1406,10 @@ int main(int argc, char **argv) {
  *   			<undefined>
  *   			var_block -- contains location expr
  */
-		char *break_name = "ret";
+		char *break_name = "fizz";
 
 		// Find current scope based on RIP
-		int blk_idx = blk_len - 1;
+		uint64_t blk_idx = blk_len - 1;
 		Block *scope_block = NULL;
 		for (; blk_idx >= 0; blk_idx--) {
 			Block *blk = &block_table[blk_idx];
@@ -1437,12 +1421,14 @@ int main(int argc, char **argv) {
 		if (scope_block == NULL) {
 			goto loop_end;
 		}
+		uint64_t scope_idx = blk_idx;
 
-		// Find nearest named parent scope based on RIP
+		// Find nearest parent scope with frame_base_expr based on RIP
 		Block *framed_scope = NULL;
 		if (scope_block->name == NULL) {
 			for (int i = blk_len - 1; i >= 0; i--) {
 				Block *blk = &block_table[i];
+
 				if (blk->frame_base_expr_len && blk->name != NULL && (regs.rip >= blk->low_pc) && (regs.rip <= (blk->low_pc + blk->high_pc))) {
 					framed_scope = blk;
 					break;
@@ -1455,10 +1441,22 @@ int main(int argc, char **argv) {
 			framed_scope = scope_block;
 		}
 
+		printf("framed scope range: 0x%lx <0x%llx> 0x%lx\n", framed_scope->low_pc, regs.rip, framed_scope->low_pc + framed_scope->high_pc);
+		printf("lexical scope range: 0x%lx <0x%llx> 0x%lx\n", scope_block->low_pc, regs.rip, scope_block->low_pc + scope_block->high_pc);
+		{
+			DWExprMachine em = {0};
+			em.frame_holder = framed_scope;
+			DWExpression ex = { .expr = framed_scope->frame_base_expr, .len = framed_scope->frame_base_expr_len };
+			eval_expr(&regs, &em, ex, 0);
+			uint64_t frame_base = em.val_stack[0];
+			printf("framed scope frame base: 0x%lx\n", frame_base);
+		}
+
 		// Find variable in scope by descending tree from scope_block (can pass into other scopes)
 		Block *var_block = NULL;
 		for (; blk_idx < blk_len; blk_idx++) {
 			Block *blk = &block_table[blk_idx];
+			printf("%lu | %s\n", blk_idx, blk->name);
 			if (blk->name && strcmp(blk->name, break_name) == 0) {
 				var_block = blk;
 				break;
@@ -1470,8 +1468,10 @@ int main(int argc, char **argv) {
 
 		// Walk parent_idx to confirm that variable obtained in last pass belongs to current scope
 		Block *tmp_var_block = var_block;
+		uint64_t tmp_var_block_idx = blk_idx;
 		for (;;) {
-			if (scope_block->idx == tmp_var_block->idx) {
+			printf("-- %lu | %s\n", tmp_var_block_idx, tmp_var_block->name);
+			if (scope_idx == tmp_var_block_idx) {
 				break;
 			}
 
@@ -1480,18 +1480,22 @@ int main(int argc, char **argv) {
 				goto loop_end;
 			}
 
-			int var_block_idx = tmp_var_block->parent_idx;
-			if (!var_block_idx) {
+			if (tmp_var_block->parent_idx == tmp_var_block_idx) {
+				panic("Invalid parent, hotlooping\n");
+			}
+
+			tmp_var_block_idx = tmp_var_block->parent_idx;
+			if (!tmp_var_block_idx) {
 				panic("Unable to lookup parent of entry!\n");
 			}
 
-			tmp_var_block = &block_table[var_block_idx];
+			tmp_var_block = &block_table[tmp_var_block_idx];
 		}
 
 		printf("Found variable %s in %s\n", var_block->name, framed_scope->name);
 
 		// Start evaluating variable location expression using framed scope as reference
-		printf("RIP: %llx, LOW: %lx, HIGH: %lx\n", regs.rip, framed_scope->low_pc, framed_scope->low_pc + framed_scope->high_pc);
+		printf("framed scope: %lx <%llx> %lx\n", framed_scope->low_pc, regs.rip, framed_scope->low_pc + framed_scope->high_pc);
 		DWExprMachine em = {0};
 		em.frame_holder = framed_scope;
 		DWExpression ex = { .expr = var_block->loc_expr, .len = var_block->loc_expr_len };
@@ -1500,7 +1504,7 @@ int main(int argc, char **argv) {
 		uint64_t var_addr = em.val_stack[0];
 		uint64_t val = ptrace(PTRACE_PEEKDATA, pid, (void *)var_addr, NULL);
 		printf("Variable %s in %s @ 0x%lx; %ld\n", var_block->name, framed_scope->name, var_addr, val);
-		for (int i = 0; i < em.val_stack_len; i++) {
+		for (uint64_t i = 0; i < em.val_stack_len; i++) {
 			printf("val in stack: 0x%lx\n", em.val_stack[i]);
 		}
 
@@ -1508,21 +1512,22 @@ int main(int argc, char **argv) {
 
 		// Determine type of variable
 		Block *type_blk = NULL;
-		for (int i = 0; i < blk_len; i++) {
+		for (uint64_t i = 0; i < blk_len; i++) {
 			if (block_table[i].au_offset == var_block->type_offset) {
 				type_blk = &block_table[i];
 				break;
 			}
 		}
 		if (!type_blk) {
-			panic("Unable to find type block for function %s\n", framed_scope->name);
+			panic("Unable to find type block for variable %s\n", var_block->name);
 		}
+
+		printf("current type is %s\n", dwarf_tag_to_str(var_block->type));
 
 		int type_width = 0;
 		int i = type_blk->au_offset;
 		for (int j = 0; j < (type_blk->attr_count * 2); j += 2) {
 			uint8_t attr_name = type_blk->attr_buf[j];
-			//uint8_t attr_form = type_blk->attr_buf[j + 1];
 
 			DWResult ret = parse_data(&sections, i + 1, type_blk->attr_buf, j);
 			switch (attr_name) {
@@ -1574,6 +1579,7 @@ int main(int argc, char **argv) {
 		printf("CHANGE DETECTED: Variable %s in %s @ 0x%lx; %ld\n", var_block->name, framed_scope->name, var_addr, new_val);
 
 loop_end:
+		printf("\n");
 		usleep(500000);
 	}
 }
