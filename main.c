@@ -116,6 +116,12 @@ typedef struct {
 	uint8_t *frame_base_expr;
 	int frame_base_expr_len;
 
+	uint32_t type_width;
+	uint32_t type_encoding;
+
+	uint32_t member_offset;
+	bool member_offset_present;
+
 	uint64_t low_pc;
 	uint64_t high_pc;
 } Block;
@@ -255,6 +261,26 @@ typedef struct {
 	X(DW_TAG_variable, 0x34) \
 	X(DW_TAG_program, 0xFF) \
 
+#define DWARF_ATE \
+	X(DW_ATE_address, 0x01) \
+	X(DW_ATE_boolean, 0x02) \
+	X(DW_ATE_complex_float, 0x03) \
+	X(DW_ATE_float, 0x04) \
+	X(DW_ATE_signed, 0x05) \
+	X(DW_ATE_signed_char, 0x06) \
+	X(DW_ATE_unsigned, 0x07) \
+	X(DW_ATE_unsigned_char, 0x08) \
+	X(DW_ATE_imaginary_float, 0x09) \
+	X(DW_ATE_packed_decimal, 0x0a) \
+	X(DW_ATE_numeric_string, 0x0b) \
+	X(DW_ATE_edited, 0x0c) \
+	X(DW_ATE_signed_fixed, 0x0d) \
+	X(DW_ATE_unsigned_fixed, 0x0e) \
+	X(DW_ATE_decimal_float, 0x0f) \
+	X(DW_ATE_UTF, 0x10) \
+	X(DW_ATE_lo_user, 0x80) \
+	X(DW_ATE_hi_user, 0xff) \
+
 #define DWARF_AT \
 	X(DW_AT_location, 0x02) \
 	X(DW_AT_name, 0x03) \
@@ -346,6 +372,7 @@ typedef struct {
 enum { DWARF_FORM };
 enum { DWARF_TAG };
 enum { DWARF_AT };
+enum { DWARF_ATE };
 enum { DWARF_LINE };
 enum { DWARF_LNS };
 enum { DWARF_OP };
@@ -467,6 +494,17 @@ char *dwarf_tag_to_str(uint8_t id) {
 			if (id > 0x80) {
 				panic("TODO Error on tag (0x%x) We don't actually handle LEB128\n", id);
 			}
+			return "(unknown)";
+		}
+	}
+}
+
+char *dwarf_type_to_str(uint8_t type) {
+	switch (type) {
+		#define X(name, value) case name: { return #name; } break;
+			DWARF_ATE
+		#undef X
+		default:   {
 			return "(unknown)";
 		}
 	}
@@ -997,6 +1035,14 @@ void build_block_table(DWSections *sections, Block **ext_block_table, uint64_t *
 				DWResult ret = parse_data(sections, i, entry->attr_buf, j);
 
 				switch (attr_name) {
+					case DW_AT_data_member_location: {
+						if (ret.type != DWUVal) {
+							panic("Unable to handle member location exprs\n");
+						}
+
+						blk->member_offset = ret.data.val;
+						blk->member_offset_present = true;
+					} break;
 					case DW_AT_frame_base: {
 						blk->frame_base_expr = ret.data.expr;
 						blk->frame_base_expr_len = ret.size;
@@ -1025,6 +1071,12 @@ void build_block_table(DWSections *sections, Block **ext_block_table, uint64_t *
 
 						blk->loc_expr = ret.data.expr;
 						blk->loc_expr_len = ret.size;
+					} break;
+					case DW_AT_byte_size: {
+						blk->type_width = ret.data.val;
+					} break;
+					case DW_AT_encoding: {
+						blk->type_encoding = ret.data.val;
 					} break;
 					default: { 
 					}
@@ -1297,6 +1349,15 @@ void print_block_table(Block *block_table, uint64_t block_len) {
 		}
 		if (block->type_offset) {
 			printf("%*c- type offset: <0x%lx>\n", indent_width, ' ', block->type_offset);
+		}
+		if (block->member_offset_present) {
+			printf("%*c- member offset: <0x%x>\n", indent_width, ' ', block->member_offset);
+		}
+		if (block->type_width) {
+			printf("%*c- type width: %u\n", indent_width, ' ', block->type_width);
+		}
+		if (block->type_encoding) {
+			printf("%*c- type encoding: %s\n", indent_width, ' ', dwarf_type_to_str(block->type_encoding));
 		}
 	}
 }
@@ -1572,13 +1633,10 @@ int main(int argc, char **argv) {
 	Breakpoint *br = &dbg.break_table[dbg.break_len++];
 	add_breakpoint(pid, br, main_ff.end);
 
-	char *var_name = "bar";
-	char *file_name = "shadows.c";
-	uint64_t line_num = 6;
-	uint64_t line_addr = find_line_addr_in_file(&dbg, file_name, line_num);
-	printf("Found address 0x%lx for line %lu in %s\n", line_addr, line_num, file_name);
 	Breakpoint *br2 = &dbg.break_table[dbg.break_len++];
-	add_breakpoint(pid, br2, line_addr);
+	add_breakpoint(pid, br2, main_ff.start);
+
+	char *var_name = "foo";
 
 	ptrace(PTRACE_CONT, pid, NULL, NULL);
 	wait(&status);
@@ -1794,6 +1852,7 @@ int main(int argc, char **argv) {
 		Block *tmp_var_block = var_block;
 		uint64_t tmp_var_block_idx = var_idx;
 		for (;;) {
+			printf("-- block %lu | frame %lu | scope %lu\n", tmp_var_block_idx, framed_scope_idx, scope_idx);
 			if (scope_idx == tmp_var_block_idx || framed_scope_idx == tmp_var_block_idx) {
 				break;
 			}
@@ -1813,7 +1872,6 @@ int main(int argc, char **argv) {
 			}
 
 			tmp_var_block = &dbg.block_table[tmp_var_block_idx];
-			printf("-- block %lu | frame %lu | scope %lu\n", tmp_var_block_idx, framed_scope_idx, scope_idx);
 		}
 		
 		// first time entry: add to watchpoint list, set breakpoint when watchpoint leaves scope
@@ -1876,21 +1934,6 @@ int main(int argc, char **argv) {
 			panic("Unable to find type block for variable %s\n", var_block->name);
 		}
 
-		int type_width = 0;
-		int i = type_blk->au_offset;
-		for (int j = 0; j < (type_blk->attr_count * 2); j += 2) {
-			uint8_t attr_name = type_blk->attr_buf[j];
-
-			DWResult ret = parse_data(&dbg.sections, i + 1, type_blk->attr_buf, j);
-			switch (attr_name) {
-				case DW_AT_byte_size: {
-					type_width = ret.data.val;
-				} break;
-			}
-
-			i += ret.skip;
-		}
-
 		// Determine variable address alignment to figure out how to place variable
 		int is_8b_aligned = (var_addr & 0x7) == 0;
 		int is_4b_aligned = (var_addr & 0x3) == 0;
@@ -1898,29 +1941,21 @@ int main(int argc, char **argv) {
 
 		//printf("8 %d, 4 %d, 2 %d\n", is_8b_aligned, is_4b_aligned, is_2b_aligned);
 
-		if (!(is_8b_aligned || is_4b_aligned || is_2b_aligned || type_width == 1)) {
+		if (!(is_8b_aligned || is_4b_aligned || is_2b_aligned || type_blk->type_width == 1)) {
 			panic("Unable to handle unaligned watchpoints!\n");
 		}
 
-		uint64_t val = ptrace(PTRACE_PEEKDATA, pid, (void *)var_addr, NULL);
-		if (type_width == 4) {
-			val = (uint32_t)val;
-		} else if (type_width == 2) {
-			val = (uint16_t)val;
-		}
-
-		printf("Variable %s in %s @ 0x%lx; %ld\n", var_block->name, framed_scope->name, var_addr, val);
-		for (uint64_t i = 0; i < em.val_stack_len; i++) {
-			printf("val in stack: 0x%lx\n", em.val_stack[i]);
-		}
-
+		printf("Type width: %d\n", type_blk->type_width);
 
 		// Intel Vol. 3B 17-5
 		char width_bits = 0;
-		if (type_width == 8) { width_bits = 0b10; }
-		else if (type_width == 4) { width_bits = 0b11; }
-		else if (type_width == 2) { width_bits = 0b01; }
-		else if (type_width == 1) { width_bits = 0b00; }
+		if (type_blk->type_width == 8) { width_bits = 0b10; }
+		else if (type_blk->type_width == 4) { width_bits = 0b11; }
+		else if (type_blk->type_width == 2) { width_bits = 0b01; }
+		else if (type_blk->type_width == 1) { width_bits = 0b00; }
+		else {
+			panic("Unable to handle width %d\n", type_blk->type_width);
+		}
 
 		// trap with breakpoint 0, write only
 		uint64_t dr7 = 0b00000000000000010000001000000001;
@@ -1939,9 +1974,9 @@ int main(int argc, char **argv) {
 		}
 
 		uint64_t tmp_val = ptrace(PTRACE_PEEKDATA, pid, (void *)var_addr, NULL);
-		if (type_width == 4) {
+		if (type_blk->type_width == 4) {
 			tmp_val = (uint32_t)tmp_val;
-		} else if (type_width == 2) {
+		} else if (type_blk->type_width == 2) {
 			tmp_val = (uint16_t)tmp_val;
 		}
 
