@@ -32,6 +32,12 @@ enum {
 	SHT_DYNAMIC
 };
 
+typedef struct {
+	uint8_t *data;
+	uint64_t offset;
+	uint64_t length;
+} DOLT;
+
 #pragma pack(1)
 typedef struct {
 	uint8_t  e_ident[16];
@@ -71,17 +77,31 @@ typedef struct {
 } DWARF32_CUHdr;
 
 typedef struct {
-	uint32_t unit_length;
-	uint16_t version;
-	uint32_t header_length;
 	uint8_t  min_inst_length;
 	uint8_t  max_ops_per_inst;
 	uint8_t  default_is_stmt;
 	int8_t   line_base;
-	int8_t   line_range;
+	uint8_t  line_range;
 	uint8_t  opcode_base;
-} DWARF32_LineHdr;
+} DWARF_V4_LineHdr;
+
+typedef struct {
+	uint8_t  min_inst_length;
+	uint8_t  default_is_stmt;
+	int8_t   line_base;
+	uint8_t  line_range;
+	uint8_t  opcode_base;
+} DWARF_V3_LineHdr;
 #pragma pack()
+
+typedef struct {
+	uint8_t  min_inst_length;
+	uint8_t  max_ops_per_inst;
+	uint8_t  default_is_stmt;
+	int8_t   line_base;
+	uint8_t  line_range;
+	uint8_t  opcode_base;
+} DWARF_LineHdr;
 
 typedef struct {
 	uint64_t id;
@@ -151,7 +171,7 @@ typedef struct {
 	uint32_t op_buf_size;
 	bool     default_is_stmt;
 	int8_t   line_base;
-	int8_t   line_range;
+	uint8_t   line_range;
 	uint8_t  opcode_base;
 
 	LineMachine *lines;
@@ -237,6 +257,7 @@ typedef struct {
 	X(DW_FORM_addr, 0x01) \
 	X(DW_FORM_data2, 0x05) \
 	X(DW_FORM_data4, 0x06) \
+	X(DW_FORM_string, 0x08) \
 	X(DW_FORM_data1, 0x0b) \
 	X(DW_FORM_strp, 0x0e) \
 	X(DW_FORM_udata, 0x0f) \
@@ -692,6 +713,14 @@ DWResult parse_data(DWSections *sections, int data_idx, uint8_t *attr_buf, int a
 	DWResult ret = {0};
 
 	switch (attr_form) {
+		case DW_FORM_string: {
+			char *str = (char *)debug_info_ptr;
+			uint64_t str_len = strlen(str);
+
+			ret.type = DWString;
+			ret.data.str = str;
+			ret.skip = str_len + 1;
+		} break;
 		case DW_FORM_strp: {
 			uint32_t str_off = *((uint32_t *)debug_info_ptr);
 			char *str = (char *)(sections->debug_str + str_off);
@@ -984,8 +1013,13 @@ void build_block_table(DWSections *sections, Block **ext_block_table, uint64_t *
 			panic("TODO Currently this debugger only handles 32 bit DWARF!\n");
 		}
 
-		if (cu_hdr->version != 4) {
-			panic("TODO This code only supports DWARF 4, got %d!\n", cu_hdr->version);
+		if (cu_hdr->unit_length == 0) {
+			i += sizeof(cu_hdr->unit_length);
+			continue;
+		}
+
+		if (!(cu_hdr->version == 4 || cu_hdr->version == 3)) {
+			panic("TODO This code supports DWARF 3 and 4, got %d!\n", cu_hdr->version);
 		}
 		i += sizeof(DWARF32_CUHdr);
 
@@ -1060,8 +1094,8 @@ void build_block_table(DWSections *sections, Block **ext_block_table, uint64_t *
 						blk->type_offset = (uint32_t)(ret.data.val + cur_cu_off);
 					} break;
 					case DW_AT_language: {
-						if (ret.data.val != 0x0c) {
-							panic("Debugger currently only supports C99, got %lu!\n", ret.data.val);
+						if (!(ret.data.val == 0x0c || ret.data.val == 32769)) {
+							panic("Debugger currently only supports C99 and x64 ASM, got %lu!\n", ret.data.val);
 						}
 					} break;
 					case DW_AT_location: {
@@ -1103,14 +1137,81 @@ void build_block_table(DWSections *sections, Block **ext_block_table, uint64_t *
 	}
 }
 
+uint64_t parse_dwarfv4_line_hdr(DWARF_LineHdr *line_hdr, DOLT *ptr) {
+	if (ptr->offset + sizeof(DWARF_V4_LineHdr) > ptr->length) {
+		panic("Not enough space for DWARF line header!\n");
+	}
+
+	DWARF_V4_LineHdr *int_line_hdr = (DWARF_V4_LineHdr *)(ptr->data + ptr->offset);
+	line_hdr->min_inst_length = int_line_hdr->min_inst_length;
+	line_hdr->max_ops_per_inst = int_line_hdr->max_ops_per_inst;
+	line_hdr->default_is_stmt = int_line_hdr->default_is_stmt;
+	line_hdr->line_base 	  = int_line_hdr->line_base;
+	line_hdr->line_range 	  = int_line_hdr->line_range;
+	line_hdr->opcode_base 	  = int_line_hdr->opcode_base;
+
+	return sizeof(DWARF_V4_LineHdr);
+}
+
+uint64_t parse_dwarfv3_line_hdr(DWARF_LineHdr *line_hdr, DOLT *ptr) {
+	if (ptr->offset + sizeof(DWARF_V3_LineHdr) > ptr->length) {
+		panic("Not enough space for DWARF line header!\n");
+	}
+
+	DWARF_V3_LineHdr *int_line_hdr = (DWARF_V3_LineHdr *)(ptr->data + ptr->offset);
+	line_hdr->min_inst_length = int_line_hdr->min_inst_length;
+	line_hdr->default_is_stmt = int_line_hdr->default_is_stmt;
+	line_hdr->line_base 	  = int_line_hdr->line_base;
+	line_hdr->line_range 	  = int_line_hdr->line_range;
+	line_hdr->opcode_base 	  = int_line_hdr->opcode_base;
+
+	return sizeof(DWARF_V3_LineHdr);
+}
+
 void build_line_tables(DWSections *sections, CULineTable **ext_line_table, uint64_t *line_tables_len, uint64_t *line_tables_max) {
 	CULineTable *line_tables = *ext_line_table;
 
 	int i = 0;
 	while (i < sections->debug_line_size) {
-		DWARF32_LineHdr *line_hdr = (DWARF32_LineHdr *)(sections->debug_line + i);
-		if ((*(uint32_t *)(sections->debug_line + i)) == 0xFFFFFFFF) {
+		uint32_t unit_length = *(uint32_t *)(sections->debug_line + i);
+		if (unit_length == 0xFFFFFFFF) {
 			panic("TODO Currently this debugger only handles 32 bit DWARF!\n");
+		}
+		i += sizeof(unit_length);
+
+		if (unit_length == 0) {
+			continue;
+		}
+
+		uint16_t version = *(uint16_t *)(sections->debug_line + i);
+		if (!(version == 4 || version == 3)) {
+			panic("TODO This code supports DWARF 3 and 4, got %d!\n", version);
+		}
+		i += sizeof(version);
+
+		// TODO make this vary to support DWARF64
+		uint64_t header_length = *(uint32_t *)(sections->debug_line + i);
+		uint32_t header_length_size = sizeof(uint32_t);
+		i += header_length_size;
+
+		DWARF_LineHdr line_hdr = {0};
+		DOLT ptr = { .data = sections->debug_line, .offset = i, .length = sections->debug_line_size };
+		if (version == 3) {
+			i += parse_dwarfv3_line_hdr(&line_hdr, &ptr);
+		} else if (version == 4) {
+			i += parse_dwarfv4_line_hdr(&line_hdr, &ptr);
+		}
+		
+/*
+		printf("min inst length:  %d\n", line_hdr.min_inst_length);
+		printf("default is stmt:  %d\n", line_hdr.default_is_stmt);
+		printf("line base:        %d\n", line_hdr.line_base);
+		printf("line range:       %d\n", line_hdr.line_range);
+		printf("opcode base:      %d\n", line_hdr.opcode_base);
+*/
+
+		if (line_hdr.opcode_base != 13) {
+			panic("TODO This debugger can't handle non-standard line ops! %d\n", line_hdr.opcode_base);
 		}
 
 		CULineTable *line_table = &line_tables[*line_tables_len];
@@ -1119,16 +1220,7 @@ void build_line_tables(DWSections *sections, CULineTable **ext_line_table, uint6
 		}
 		*line_tables_len += 1;
 
-		if (line_hdr->version != 4) {
-			panic("TODO This code only supports DWARF 4, got %d!\n", line_hdr->version);
-		}
-
-		if (line_hdr->opcode_base != 13) {
-			panic("TODO This debugger can't handle non-standard line ops!\n");
-		}
-		i += sizeof(DWARF32_LineHdr);
-
-		int op_lengths_size = line_hdr->opcode_base - 1;
+		int op_lengths_size = line_hdr.opcode_base - 1;
 		i += op_lengths_size;
 
 		line_table->dirs[0] = sections->cur_dir;
@@ -1173,17 +1265,17 @@ void build_line_tables(DWSections *sections, CULineTable **ext_line_table, uint6
 			file_count++;
 		}
 
-		uint32_t cu_size  = line_hdr->unit_length + sizeof(line_hdr->unit_length);
-		uint32_t hdr_size = line_hdr->header_length + sizeof(line_hdr->unit_length) + sizeof(line_hdr->version) + sizeof(line_hdr->header_length);
+		uint32_t cu_size  = unit_length + sizeof(unit_length);
+		uint32_t hdr_size = header_length + sizeof(unit_length) + sizeof(version) + header_length_size;
 		uint32_t rem_size = cu_size - hdr_size;
 
 		line_table->dir_count   = dir_count;
 		line_table->file_count  = file_count;
 		line_table->op_buf      = sections->debug_line + i;
 		line_table->op_buf_size = rem_size;
-		line_table->opcode_base = line_hdr->opcode_base;
-		line_table->line_base   = line_hdr->line_base;
-		line_table->line_range  = line_hdr->line_range;
+		line_table->opcode_base = line_hdr.opcode_base;
+		line_table->line_base   = line_hdr.line_base;
+		line_table->line_range  = line_hdr.line_range;
 
 		line_table->line_max    = 4096;
 		line_table->lines       = calloc(sizeof(LineMachine), line_table->line_max);
