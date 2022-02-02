@@ -423,6 +423,7 @@ enum { DWARF_OP };
 #define BLOCK_STACK_MAX 20
 #define LINE_TABLES_MAX 20
 #define TYPE_CHAIN_MAX 20
+#define VAL_STACK_MAX 32
 #define BREAKPOINTS_MAX 1024
 #define WATCHPOINTS_MAX 1024
 
@@ -818,7 +819,6 @@ typedef struct {
 	uint64_t data;
 } DWStackVal;
 
-#define VAL_STACK_MAX 32
 typedef struct {
 	uint64_t val_stack[VAL_STACK_MAX];
 	uint64_t val_stack_len;
@@ -1509,102 +1509,17 @@ uint64_t find_line_addr_in_file(DebugState *dbg, char *break_file, uint32_t brea
 	return break_addr;
 }
 
-uint64_t find_function_frame_addr(Block *block_table, uint64_t block_len, char *func_name) {
-	uint64_t break_addr = ~0;
-
+FuncFrame *find_function_frame(Block *block_table, uint64_t block_len, char *func_name, FuncFrame *ff) {
 	for (uint64_t i = 0; i < block_len; i++) {
 		Block *block = &block_table[i];
 		if (block->type == DW_TAG_subprogram && block->name && strcmp(block->name, func_name) == 0) {
-			break_addr = block->low_pc;
-			break;
+			ff->start = block->low_pc;
+			ff->end = block->low_pc + block->high_pc;
+			return ff;
 		}
 	}
-	if (break_addr == (uint64_t)~0) {
-		panic("Failed to find the address for function %s\n", func_name);
-	}
 
-	return break_addr;
-}
-
-
-// This does some work to try to skip the function frame preamble, so variable lookup works properly
-FuncFrame *find_function_frame_approx(DebugState *dbg, char *func_name, FuncFrame *ff) {
-	Block *func_block = NULL;
-	for (uint64_t i = 0; i < dbg->block_len; i++) {
-		Block *block = &dbg->block_table[i];
-		if (block->type == DW_TAG_subprogram && block->name && strcmp(block->name, func_name) == 0) {
-			func_block = block;
-			break;
-		}
-	}
-	if (!func_block) {
-		printf("Failed to find the address for function %s\n", func_name);
-		return NULL;
-	}
-
-	Block *cu_block = &dbg->block_table[func_block->cu_idx];
-
-	uint64_t break_low_addr = ~0;
-	uint64_t break_high_addr = ~0;
-	for (uint64_t i = 0; i < dbg->line_tables_len; i++) {
-		CULineTable *line_table = &dbg->line_tables[i];
-		int j;
-
-		uint32_t break_file_idx = 0;
-		for (j = 1; j < line_table->file_count; j++) {
-			if (!(strcmp(line_table->filenames[j], cu_block->name))) {
-				break_file_idx = j;
-				break;
-			}
-		}
-		if (j == line_table->file_count) {
-			continue;
-		}
-
-		uint64_t low_addr = func_block->low_pc;
-		uint64_t high_addr = func_block->low_pc + func_block->high_pc;
-		for (int j = 0; j < line_table->line_count - 1; j++) {
-			LineMachine line = line_table->lines[j];
-			LineMachine next_line = line_table->lines[j+1];
-
-			if (break_file_idx == line.file_idx && line.address >= low_addr) {
-				if (next_line.file_idx == break_file_idx) {
-					break_low_addr = next_line.address;
-				} else {
-					break_low_addr = line.address;
-				}
-				break;
-			}
-		}
-		for (int j = line_table->line_count - 2; j >= 0; j--) {
-			LineMachine line = line_table->lines[j];
-			LineMachine prev_line = line_table->lines[j+1];
-
-			if (break_file_idx == prev_line.file_idx && line.address > break_low_addr && prev_line.address == break_high_addr) {
-				break_high_addr = prev_line.address;
-				break;
-			}
-
-			if (!j) {
-				break_high_addr = high_addr;
-				break;
-			}
-		}
-		break;
-	}
-	if (break_low_addr == (uint64_t)~0 || break_high_addr == (uint64_t)~0) {
-		printf("Failed to find frame addresses for func %s\n", func_block->name);
-		return NULL;
-	}
-
-/*
-	printf("FOUND: %lx - %lx || [%lx - %lx]\n", func_block->low_pc, func_block->low_pc + func_block->high_pc, break_low_addr, break_high_addr);
-	ff->start = break_low_addr;
-	ff->end = break_high_addr;
-*/
-	ff->start = func_block->low_pc;
-	ff->end = func_block->low_pc + func_block->high_pc - 1;
-	return ff;
+	return NULL;
 }
 
 void get_approx_line_for_addr(DebugState *dbg, uint64_t addr, LineMachine **lm) {
@@ -1685,11 +1600,6 @@ void init_debug_state(DebugState *dbg, char *bin_name) {
 	dbg->watch_table = (Watchpoint *)calloc(sizeof(Watchpoint), dbg->watch_max);
 	dbg->watch_len = 0;
 
-	if (!find_function_frame_approx(dbg, "main", &dbg->main_frame)) {
-		dbg->found_main = false;
-	} else {
-		dbg->found_main = true;
-	}
 
 	dbg->reset_idx = 0;
 	dbg->should_reset = false;
@@ -1731,7 +1641,7 @@ void continue_to_next(DebugState *dbg, int pid) {
 
 
 	
-	// Check watchpoints via DR6 here
+	// TODO Check watchpoints via DR6 here
 	/*
 	uint64_t tmp_val = ptrace(PTRACE_PEEKDATA, pid, (void *)var_addr, NULL);
 	if (type_blk->type_width == 4) {
@@ -1748,7 +1658,6 @@ void continue_to_next(DebugState *dbg, int pid) {
 	printf("PRE-STEP RIP: %llx\n", regs.rip);
 	uint64_t prev_address = regs.rip - 1;
 	uint64_t prev_inst = ptrace(PTRACE_PEEKDATA, pid, (void *)prev_address, NULL);
-	uint64_t cur_inst = ptrace(PTRACE_PEEKDATA, pid, (void *)regs.rip, NULL);
 
 	// check if we just stepped over a trap that needs to be patched
 	if ((prev_inst & 0xFF) != 0xCC) {
@@ -1783,19 +1692,6 @@ void continue_to_next(DebugState *dbg, int pid) {
 
 	uint64_t new_inst = ptrace(PTRACE_PEEKDATA, pid, (void *)regs.rip, NULL);
 	printf("fixed instruction: %lx @ 0x%llx\n", new_inst, regs.rip);
-
-	// If we reached the end of main, die
-	if (regs.rip == dbg->main_frame.end) {
-		ptrace(PTRACE_CONT, pid, NULL, NULL);
-		waitpid(pid, &status, 0);
-		if (WIFEXITED(status)) {
-			int ret_val = WEXITSTATUS(status);
-			happy_death("Finished main with return code %d, bye!\n", ret_val);
-		} else {
-			ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-			panic("WTF? 0x%x 0x%llx\n", status, regs.rip);
-		}
-	}
 
 	if (break_check->ref_count > 0) {
 		dbg->reset_idx = i;
@@ -1971,7 +1867,7 @@ void add_watchpoint(DebugState *dbg, int pid, char *var_name) {
 		uint64_t start, end;
 		if (framed_scope_idx == scope_idx) {
 			FuncFrame ff = {0};
-			if (!find_function_frame_approx(dbg, framed_scope->name, &ff)) {
+			if (!find_function_frame(dbg->block_table, dbg->block_len, framed_scope->name, &ff)) {
 				panic("Failed to find function frame for function\n");
 			}
 
@@ -2123,18 +2019,17 @@ int main(int argc, char **argv) {
 	waitpid(pid, &status, 0);
 
 	print_block_table(dbg.block_table, dbg.block_len);
-	
-	if (dbg.found_main) {
+
+	FuncFrame main_frame = {0};
+	if (find_function_frame(dbg.block_table, dbg.block_len, "main", &main_frame)) {
 		// Set trap on main end so we don't have to wait through libc pre and postamble
-		printf("Found frame for main: 0x%lx - 0x%lx!\n", dbg.main_frame.start, dbg.main_frame.end);
+		printf("Found frame for main: 0x%lx - 0x%lx!\n", main_frame.start, main_frame.end);
 
 		Breakpoint *br = &dbg.break_table[dbg.break_len++];
-		add_breakpoint(pid, br, dbg.main_frame.start);
+		add_breakpoint(pid, br, main_frame.start);
 
 		Breakpoint *br2 = &dbg.break_table[dbg.break_len++];
-		add_breakpoint(pid, br2, dbg.main_frame.end);
-	} else {
-		printf("No main found!\n");
+		add_breakpoint(pid, br2, main_frame.end);
 	}
 
 	continue_to_next(&dbg, pid);
