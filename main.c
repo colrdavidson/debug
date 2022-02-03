@@ -48,7 +48,7 @@ typedef struct {
 	uint8_t *data;
 	uint64_t offset;
 	uint64_t length;
-} DOLT;
+} dol_t;
 
 #pragma pack(1)
 typedef struct {
@@ -261,6 +261,18 @@ typedef struct {
 } DWSections;
 
 typedef struct {
+	uint8_t *expr;
+	uint64_t len;
+} DWExpression;
+
+typedef struct {
+	uint64_t val_stack[VAL_STACK_MAX];
+	uint64_t val_stack_len;
+
+	Block *frame_holder;
+} DWExprMachine;
+
+typedef struct {
 	uint64_t start;
 	uint64_t end;
 } FuncFrame;
@@ -292,6 +304,7 @@ typedef struct {
 	bool should_reset;
 	uint64_t reset_idx;
 
+	bool sw_watch_enabled;
 	HWBreak hw_slots[HW_SLOTS_MAX];
 	uint64_t hw_slots_max;
 } DebugState;
@@ -443,44 +456,42 @@ enum { DWARF_OP };
 #undef X
 
 
-
-
 uint64_t get_regval_for_dwarf_reg(struct user_regs_struct *regs, uint8_t idx) {
 	switch (idx) {
-		case 0: { return regs->rax; } break;
-		case 1: { return regs->rdx; } break;
-		case 2: { return regs->rcx; } break;
-		case 3: { return regs->rbx; } break;
-		case 4: { return regs->rsi; } break;
-		case 5: { return regs->rdi; } break;
-		case 6: { return regs->rbp; } break;
-		case 7: { return regs->rsp; } break;
-		case 8: { return regs->r8; } break;
-		case 9: { return regs->r9; } break;
-		case 10: { return regs->r10; } break;
-		case 11: { return regs->r11; } break;
-		case 12: { return regs->r12; } break;
-		case 13: { return regs->r13; } break;
-		case 14: { return regs->r14; } break;
-		case 15: { return regs->r15; } break;
-//		case 16: { return regs->ra; } break;
+		case 0: return regs->rax;
+		case 1: return regs->rdx;
+		case 2: return regs->rcx;
+		case 3: return regs->rbx;
+		case 4: return regs->rsi;
+		case 5: return regs->rdi;
+		case 6: return regs->rbp;
+		case 7: return regs->rsp;
+		case 8: return regs->r8;
+		case 9: return regs->r9;
+		case 10: return regs->r10;
+		case 11: return regs->r11;
+		case 12: return regs->r12;
+		case 13: return regs->r13;
+		case 14: return regs->r14;
+		case 15: return regs->r15;
+//		case 16: return regs->ra;
 /*
-		case 17: { return regs->xmm0; } break;
-		case 18: { return regs->xmm1; } break;
-		case 19: { return regs->xmm2; } break;
-		case 20: { return regs->xmm3; } break;
-		case 21: { return regs->xmm4; } break;
-		case 22: { return regs->xmm5; } break;
-		case 23: { return regs->xmm6; } break;
-		case 24: { return regs->xmm7; } break;
-		case 25: { return regs->xmm8; } break;
-		case 26: { return regs->xmm9; } break;
-		case 27: { return regs->xmm10; } break;
-		case 28: { return regs->xmm11; } break;
-		case 29: { return regs->xmm12; } break;
-		case 30: { return regs->xmm13; } break;
-		case 31: { return regs->xmm14; } break;
-		case 32: { return regs->xmm15; } break;
+		case 17: return regs->xmm0;
+		case 18: return regs->xmm1;
+		case 19: return regs->xmm2;
+		case 20: return regs->xmm3;
+		case 21: return regs->xmm4;
+		case 22: return regs->xmm5;
+		case 23: return regs->xmm6;
+		case 24: return regs->xmm7;
+		case 25: return regs->xmm8;
+		case 26: return regs->xmm9;
+		case 27: return regs->xmm10;
+		case 28: return regs->xmm11;
+		case 29: return regs->xmm12;
+		case 30: return regs->xmm13;
+		case 31: return regs->xmm14;
+		case 32: return regs->xmm15;
 */
 	}	
 	return 0;
@@ -543,8 +554,8 @@ void init_line_machine(LineMachine *lm, bool is_stmt) {
 
 char *dwarf_tag_to_str(uint8_t id) {
 	switch (id) {
-		case 0:    { return "0"; } break;
-		#define X(name, value) case name: { return #name; } break;
+		case 0: return "0";
+		#define X(name, value) case name: return #name;
 			DWARF_TAG
 		#undef X
 		default:   {
@@ -558,7 +569,7 @@ char *dwarf_tag_to_str(uint8_t id) {
 
 char *dwarf_type_to_str(uint8_t type) {
 	switch (type) {
-		#define X(name, value) case name: { return #name; } break;
+		#define X(name, value) case name: return #name;
 			DWARF_ATE
 		#undef X
 		default:   {
@@ -569,8 +580,8 @@ char *dwarf_type_to_str(uint8_t type) {
 
 char *dwarf_attr_name_to_str(uint8_t attr_name) {
 	switch (attr_name) {
-		case 0:    { return "0"; } break;
-		#define X(name, value) case name: { return #name; } break;
+		case 0: return "0";
+		#define X(name, value) case name: return #name;
 			DWARF_AT
 		#undef X
 		default:   {
@@ -582,11 +593,10 @@ char *dwarf_attr_name_to_str(uint8_t attr_name) {
 	}
 }
 
-
 char *dwarf_attr_form_to_str(uint8_t attr_form) {
 	switch (attr_form) {
-		case 0:                    { return "0"; } break;
-		#define X(name, value) case name: { return #name; } break;
+		case 0: return "0";
+		#define X(name, value) case name: return #name;
 			DWARF_FORM
 		#undef X
 		default:   {
@@ -600,7 +610,7 @@ char *dwarf_attr_form_to_str(uint8_t attr_form) {
 
 char *dwarf_line_ext_op_to_str(uint8_t op) {
 	switch (op) {
-		#define X(name, value) case name: { return #name; } break;
+		#define X(name, value) case name: return #name;
 			DWARF_LINE
 		#undef X
 		default:   {
@@ -614,7 +624,7 @@ char *dwarf_line_ext_op_to_str(uint8_t op) {
 
 char *dwarf_line_op_to_str(uint8_t op) {
 	switch (op) {
-		#define X(name, value) case name: { return #name; } break;
+		#define X(name, value) case name: return #name;
 			DWARF_LNS
 		#undef X
 		default:   {
@@ -645,12 +655,10 @@ char *dwarf_expr_op_to_str(uint8_t expr_op) {
 	}
 
 	switch (expr_op) {
-		#define X(name, value) case name: { return #name; } break;
+		#define X(name, value) case name: return #name;
 			DWARF_OP
 		#undef X
-		default:   {
-			return "(unknown)";
-		}
+		default: return "(unknown)";
 	}
 }
 
@@ -670,27 +678,64 @@ void print_abbrev_table(AbbrevUnit *entries, int entry_count) {
 	}
 }
 
-static void inject_breakpoint_at_addr(int pid, Breakpoint *br, uint64_t addr) {
-	uint64_t orig_data = (uint64_t)ptrace(PTRACE_PEEKDATA, pid, (void *)addr, NULL);
+void print_line_table(CULineTable *line_tables, uint64_t line_tables_len) {
+	for (uint64_t i = 0; i < line_tables_len; i++) {
+		CULineTable line_table = line_tables[i];
+		printf("CU Line Table %lu\n", i + 1);
+		printf("Files:\n");
+		for (int j = 0; j < line_table.file_count; j++) {
+			uint8_t dir_idx = line_table.dir_idx[j];
+			char *dirname = line_table.dirs[dir_idx];
 
-	// Replace first byte of code at address with int 3
-	uint64_t data_with_trap = (orig_data & (~0xFF)) | 0xCC;
-
-	ptrace(PTRACE_POKEDATA, pid, (void *)addr, (void *)data_with_trap);
-
-	br->address = addr;
-	br->orig_data = orig_data;
+			printf("- %s/%s\n", dirname, line_table.filenames[j]);
+		}
+		printf("opcode base: %d\n", line_table.opcode_base);
+		printf("line base: %d\n", line_table.line_base);
+		printf("line range: %d\n", line_table.line_range);
+		printf("default is_stmt: %d\n", line_table.default_is_stmt);
+		printf("\n");
+	}
 }
 
-static void add_breakpoint(int pid, Breakpoint *br, uint64_t addr) {
-	if (br->ref_count > 0) {
-		printf("Doing a ref skip!\n");
-		br->ref_count += 1;
-		return;
-	}
+void print_block_table(Block *block_table, uint64_t block_len) {
+	for (uint64_t i = 0; i < block_len; i++) {
+		Block *block = &block_table[i];
+		int indent_width = block->depth * 4;
+		printf("%*c<0x%lx> [%lu] %s\n", indent_width, ' ', block->au_offset, i, dwarf_tag_to_str(block->type));
 
-	inject_breakpoint_at_addr(pid, br, addr);
-	br->ref_count += 1;
+		if (block->name) {
+			printf("%*c- name: %s\n", indent_width, ' ',  block->name);
+		}
+		if (block->low_pc && block->high_pc) {
+			printf("%*c- range: 0x%lx - 0x%lx\n", indent_width, ' ',  block->low_pc, block->high_pc + block->low_pc);
+		}
+		if (block->frame_base_expr && block->frame_base_expr_len) {
+			printf("%*c- frame base expr: ", indent_width, ' ');
+			for (int j = 0; j < block->frame_base_expr_len; j++) {
+				printf("%x ", block->frame_base_expr[j]);
+			}
+			printf("\n");
+		}
+		if (block->loc_expr && block->loc_expr_len) {
+			printf("%*c- location expr: ", indent_width, ' ');
+			for (int j = 0; j < block->loc_expr_len; j++) {
+				printf("%x ", block->loc_expr[j]);
+			}
+			printf("\n");
+		}
+		if (block->type_offset) {
+			printf("%*c- type offset: <0x%lx>\n", indent_width, ' ', block->type_offset);
+		}
+		if (block->member_offset_present) {
+			printf("%*c- member offset: <0x%x>\n", indent_width, ' ', block->member_offset);
+		}
+		if (block->type_width) {
+			printf("%*c- type width: %u\n", indent_width, ' ', block->type_width);
+		}
+		if (block->type_encoding) {
+			printf("%*c- type encoding: %s\n", indent_width, ' ', dwarf_type_to_str(block->type_encoding));
+		}
+	}
 }
 
 int open_binary(char *name, char **prog_path) {
@@ -726,7 +771,6 @@ int open_binary(char *name, char **prog_path) {
 
 	return -1;
 }
-
 
 DWResult parse_data(DWSections *sections, int data_idx, uint8_t *attr_buf, int attr_idx) {
 	uint8_t attr_name = attr_buf[attr_idx];
@@ -823,51 +867,6 @@ DWResult parse_data(DWSections *sections, int data_idx, uint8_t *attr_buf, int a
 	}
 
 	return ret;
-}
-
-typedef struct {
-	uint8_t *expr;
-	uint64_t len;
-} DWExpression;
-
-typedef struct {
-	DWType type;
-	uint64_t data;
-} DWStackVal;
-
-typedef struct {
-	uint64_t val_stack[VAL_STACK_MAX];
-	uint64_t val_stack_len;
-
-	Block *frame_holder;
-} DWExprMachine;
-
-void eval_expr(struct user_regs_struct *regs, DWExprMachine *em, DWExpression in_ex, int depth) {
-	for (uint64_t i = 0; i < in_ex.len; i++) {
-		uint8_t op = in_ex.expr[i];
-
-		if (op >= 0x50 && op <= 0x6f) {
-			em->val_stack[em->val_stack_len++] = get_regval_for_dwarf_reg(regs, op - 0x50);
-		} else {
-			switch (op) {
-				case DW_OP_fbreg: {
-					uint32_t leb_size = 0;
-					int64_t data = get_leb128_i(in_ex.expr + i + 1, &leb_size);
-
-					DWExpression frame_holder_ex = { em->frame_holder->frame_base_expr, em->frame_holder->frame_base_expr_len };
-					eval_expr(regs, em, frame_holder_ex, depth + 1);
-
-					em->val_stack_len--;
-					em->val_stack[em->val_stack_len] = ((int64_t)em->val_stack[em->val_stack_len]) + data;
-
-					i += leb_size;
-				} break;
-				default: {
-					panic("\nUnhandled op 0x%x, %s!\n", op, dwarf_expr_op_to_str(op));
-				}
-			}
-		}
-	}
 }
 
 void load_elf_sections(DWSections *sections, char *file_path) {
@@ -1174,7 +1173,7 @@ void build_block_table(DWSections *sections, Block **ext_block_table, uint64_t *
 	}
 }
 
-uint64_t parse_dwarfv4_line_hdr(DWARF_LineHdr *line_hdr, DOLT *ptr) {
+uint64_t parse_dwarfv4_line_hdr(DWARF_LineHdr *line_hdr, dol_t *ptr) {
 	if (ptr->offset + sizeof(DWARF_V4_LineHdr) > ptr->length) {
 		panic("Not enough space for DWARF line header!\n");
 	}
@@ -1190,7 +1189,7 @@ uint64_t parse_dwarfv4_line_hdr(DWARF_LineHdr *line_hdr, DOLT *ptr) {
 	return sizeof(DWARF_V4_LineHdr);
 }
 
-uint64_t parse_dwarfv3_line_hdr(DWARF_LineHdr *line_hdr, DOLT *ptr) {
+uint64_t parse_dwarfv3_line_hdr(DWARF_LineHdr *line_hdr, dol_t *ptr) {
 	if (ptr->offset + sizeof(DWARF_V3_LineHdr) > ptr->length) {
 		panic("Not enough space for DWARF line header!\n");
 	}
@@ -1232,7 +1231,7 @@ void build_line_tables(DWSections *sections, CULineTable **ext_line_table, uint6
 		i += header_length_size;
 
 		DWARF_LineHdr line_hdr = {0};
-		DOLT ptr = { .data = sections->debug_line, .offset = i, .length = sections->debug_line_size };
+		dol_t ptr = { .data = sections->debug_line, .offset = i, .length = sections->debug_line_size };
 		if (version == 3) {
 			i += parse_dwarfv3_line_hdr(&line_hdr, &ptr);
 		} else if (version == 4) {
@@ -1431,64 +1430,33 @@ void build_line_tables(DWSections *sections, CULineTable **ext_line_table, uint6
 	}
 }
 
-void print_line_table(CULineTable *line_tables, uint64_t line_tables_len) {
-	for (uint64_t i = 0; i < line_tables_len; i++) {
-		CULineTable line_table = line_tables[i];
-		printf("CU Line Table %lu\n", i + 1);
-		printf("Files:\n");
-		for (int j = 0; j < line_table.file_count; j++) {
-			uint8_t dir_idx = line_table.dir_idx[j];
-			char *dirname = line_table.dirs[dir_idx];
+void init_debug_state(DebugState *dbg, char *bin_name) {
+	load_elf_sections(&dbg->sections, bin_name);
 
-			printf("- %s/%s\n", dirname, line_table.filenames[j]);
-		}
-		printf("opcode base: %d\n", line_table.opcode_base);
-		printf("line base: %d\n", line_table.line_base);
-		printf("line range: %d\n", line_table.line_range);
-		printf("default is_stmt: %d\n", line_table.default_is_stmt);
-		printf("\n");
-	}
-}
+	dbg->block_max = BLOCK_MAX;
+	dbg->block_table = (Block *)calloc(sizeof(Block), dbg->block_max);
+	dbg->block_len = 0;
+	build_block_table(&dbg->sections, &dbg->block_table, &dbg->block_len, &dbg->block_max);
 
-void print_block_table(Block *block_table, uint64_t block_len) {
-	for (uint64_t i = 0; i < block_len; i++) {
-		Block *block = &block_table[i];
-		int indent_width = block->depth * 4;
-		printf("%*c<0x%lx> [%lu] %s\n", indent_width, ' ', block->au_offset, i, dwarf_tag_to_str(block->type));
+	dbg->line_tables_max = LINE_TABLES_MAX;
+	dbg->line_tables = (CULineTable *)malloc(sizeof(CULineTable) * dbg->line_tables_max);
+	dbg->line_tables_len = 0;
+	build_line_tables(&dbg->sections, &dbg->line_tables, &dbg->line_tables_len, &dbg->line_tables_max);
 
-		if (block->name) {
-			printf("%*c- name: %s\n", indent_width, ' ',  block->name);
-		}
-		if (block->low_pc && block->high_pc) {
-			printf("%*c- range: 0x%lx - 0x%lx\n", indent_width, ' ',  block->low_pc, block->high_pc + block->low_pc);
-		}
-		if (block->frame_base_expr && block->frame_base_expr_len) {
-			printf("%*c- frame base expr: ", indent_width, ' ');
-			for (int j = 0; j < block->frame_base_expr_len; j++) {
-				printf("%x ", block->frame_base_expr[j]);
-			}
-			printf("\n");
-		}
-		if (block->loc_expr && block->loc_expr_len) {
-			printf("%*c- location expr: ", indent_width, ' ');
-			for (int j = 0; j < block->loc_expr_len; j++) {
-				printf("%x ", block->loc_expr[j]);
-			}
-			printf("\n");
-		}
-		if (block->type_offset) {
-			printf("%*c- type offset: <0x%lx>\n", indent_width, ' ', block->type_offset);
-		}
-		if (block->member_offset_present) {
-			printf("%*c- member offset: <0x%x>\n", indent_width, ' ', block->member_offset);
-		}
-		if (block->type_width) {
-			printf("%*c- type width: %u\n", indent_width, ' ', block->type_width);
-		}
-		if (block->type_encoding) {
-			printf("%*c- type encoding: %s\n", indent_width, ' ', dwarf_type_to_str(block->type_encoding));
-		}
-	}
+	dbg->break_max = BREAKPOINTS_MAX;
+	dbg->break_table = (Breakpoint *)calloc(sizeof(Breakpoint), dbg->break_max);
+	dbg->break_len = 0;
+
+	dbg->watch_max = WATCHPOINTS_MAX;
+	dbg->watch_table = (Watchpoint *)calloc(sizeof(Watchpoint), dbg->watch_max);
+	dbg->watch_len = 0;
+
+	memset(dbg->hw_slots, 0, sizeof(dbg->hw_slots));
+	dbg->hw_slots_max = HW_SLOTS_MAX;
+	dbg->sw_watch_enabled = false;
+
+	dbg->reset_idx = 0;
+	dbg->should_reset = false;
 }
 
 uint64_t find_line_addr_in_file(DebugState *dbg, char *break_file, uint32_t break_line) {
@@ -1624,6 +1592,34 @@ CurrentScopes *get_scopes(DebugState *dbg, uint64_t addr, CurrentScopes *sp) {
 	return sp;
 }
 
+void eval_expr(struct user_regs_struct *regs, DWExprMachine *em, DWExpression in_ex, int depth) {
+	for (uint64_t i = 0; i < in_ex.len; i++) {
+		uint8_t op = in_ex.expr[i];
+
+		if (op >= 0x50 && op <= 0x6f) {
+			em->val_stack[em->val_stack_len++] = get_regval_for_dwarf_reg(regs, op - 0x50);
+		} else {
+			switch (op) {
+				case DW_OP_fbreg: {
+					uint32_t leb_size = 0;
+					int64_t data = get_leb128_i(in_ex.expr + i + 1, &leb_size);
+
+					DWExpression frame_holder_ex = { em->frame_holder->frame_base_expr, em->frame_holder->frame_base_expr_len };
+					eval_expr(regs, em, frame_holder_ex, depth + 1);
+
+					em->val_stack_len--;
+					em->val_stack[em->val_stack_len] = ((int64_t)em->val_stack[em->val_stack_len]) + data;
+
+					i += leb_size;
+				} break;
+				default: {
+					panic("\nUnhandled op 0x%x, %s!\n", op, dwarf_expr_op_to_str(op));
+				}
+			}
+		}
+	}
+}
+
 // Intel Vol. 3B 17-5 - PG 3433-3434
 void update_hw_breaks(DebugState *dbg, int pid, Block *framed_scope) {
 
@@ -1695,6 +1691,29 @@ void update_hw_breaks(DebugState *dbg, int pid, Block *framed_scope) {
 	}
 }
 
+static void inject_breakpoint_at_addr(int pid, Breakpoint *br, uint64_t addr) {
+	uint64_t orig_data = (uint64_t)ptrace(PTRACE_PEEKDATA, pid, (void *)addr, NULL);
+
+	// Replace first byte of code at address with int 3
+	uint64_t data_with_trap = (orig_data & (~0xFF)) | 0xCC;
+
+	ptrace(PTRACE_POKEDATA, pid, (void *)addr, (void *)data_with_trap);
+
+	br->address = addr;
+	br->orig_data = orig_data;
+}
+
+static void add_breakpoint(int pid, Breakpoint *br, uint64_t addr) {
+	if (br->ref_count > 0) {
+		printf("Doing a ref skip!\n");
+		br->ref_count += 1;
+		return;
+	}
+
+	inject_breakpoint_at_addr(pid, br, addr);
+	br->ref_count += 1;
+}
+
 void cleanup_watchpoints(DebugState *dbg, int pid, uint64_t break_addr) {
 	// Nothing to clean up
 	if (!dbg->watch_len) {
@@ -1739,214 +1758,6 @@ void cleanup_watchpoints(DebugState *dbg, int pid, uint64_t break_addr) {
 
 	update_hw_breaks(dbg, pid, &dbg->block_table[scopes.framed_scope_idx]);
 }
-
-void init_debug_state(DebugState *dbg, char *bin_name) {
-	load_elf_sections(&dbg->sections, bin_name);
-
-	dbg->block_max = BLOCK_MAX;
-	dbg->block_table = (Block *)calloc(sizeof(Block), dbg->block_max);
-	dbg->block_len = 0;
-	build_block_table(&dbg->sections, &dbg->block_table, &dbg->block_len, &dbg->block_max);
-
-	dbg->line_tables_max = LINE_TABLES_MAX;
-	dbg->line_tables = (CULineTable *)malloc(sizeof(CULineTable) * dbg->line_tables_max);
-	dbg->line_tables_len = 0;
-	build_line_tables(&dbg->sections, &dbg->line_tables, &dbg->line_tables_len, &dbg->line_tables_max);
-
-	dbg->break_max = BREAKPOINTS_MAX;
-	dbg->break_table = (Breakpoint *)calloc(sizeof(Breakpoint), dbg->break_max);
-	dbg->break_len = 0;
-
-	dbg->watch_max = WATCHPOINTS_MAX;
-	dbg->watch_table = (Watchpoint *)calloc(sizeof(Watchpoint), dbg->watch_max);
-	dbg->watch_len = 0;
-
-	memset(dbg->hw_slots, 0, sizeof(dbg->hw_slots));
-	dbg->hw_slots_max = HW_SLOTS_MAX;
-
-	dbg->reset_idx = 0;
-	dbg->should_reset = false;
-}
-
-void reset_breakpoint(DebugState *dbg, int pid) {
-	ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
-
-	int status;
-	waitpid(pid, &status, 0);
-	if (!WIFSTOPPED(status)) {
-		panic("Failure to break on watchpoint\n");
-	}
-
-	Breakpoint *br = &dbg->break_table[dbg->reset_idx];
-
-	inject_breakpoint_at_addr(pid, br, br->address);
-
-	dbg->reset_idx = 0;
-	dbg->should_reset = false;
-}
-
-
-void continue_to_next(DebugState *dbg, int pid) {
-	struct user_regs_struct regs;
-
-
-	if (dbg->should_reset) {
-		reset_breakpoint(dbg, pid);
-	}
-
-	ptrace(PTRACE_CONT, pid, NULL, NULL);
-
-	int status;
-	waitpid(pid, &status, 0);
-	if (!WIFSTOPPED(status)) {
-		int ret_val = WEXITSTATUS(status);
-		happy_death("Program died with return code %d, bye!\n", ret_val);
-	}
-
-	uint64_t dr6 = 0;
-	dr6 = ptrace(PTRACE_PEEKUSER, pid, (void *)offsetof(struct user, u_debugreg[6]), NULL);
-
-	uint32_t triggerbits = dr6 & 0b1111;
-/*
-	int dr7_set        = (dr6 >> 12) & 1;
-	int single_stepped = (dr6 >> 14) & 1;
-*/
-
-	if (ptrace(PTRACE_POKEUSER, pid, (void *)offsetof(struct user, u_debugreg[6]), NULL)) {
-		panic("failed to set up dr6!\n");
-	}
-
-	ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-	if (triggerbits) {
-		struct user_regs_struct regs;
-		ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-
-		CurrentScopes scopes = {0};
-		if (!get_scopes(dbg, regs.rip, &scopes)) {
-			printf("Failed to find scope!\n");
-			return;
-		}
-
-		for (uint64_t i = 0; i < dbg->hw_slots_max && triggerbits; i++) {
-			if (!(triggerbits & 0b1)) {
-				goto trigger_end;
-			}
-
-			HWBreak *br = &dbg->hw_slots[i];
-			if (br->type != HWWatchpoint) {
-				goto trigger_end;
-			}
-
-			Watchpoint *wp = &dbg->watch_table[br->idx];
-			Block *var = &dbg->block_table[wp->var_idx];
-
-			// Start evaluating variable location expression using framed scope as reference
-			DWExprMachine em = {0};
-			em.frame_holder = &dbg->block_table[scopes.framed_scope_idx];
-			DWExpression ex = { .expr = var->loc_expr, .len = var->loc_expr_len };
-			eval_expr(&regs, &em, ex, 0);
-			uint64_t var_addr = em.val_stack[0];
-
-			// Determine variable address alignment to figure out how to place variable
-			int is_8b_aligned = (var_addr & 0x7) == 0;
-			int is_4b_aligned = (var_addr & 0x3) == 0;
-			int is_2b_aligned = (var_addr & 0x1) == 0;
-
-			//printf("8 %d, 4 %d, 2 %d\n", is_8b_aligned, is_4b_aligned, is_2b_aligned);
-			if (!(is_8b_aligned || is_4b_aligned || is_2b_aligned || wp->watch_width == 1)) {
-				panic("Unable to handle unaligned watchpoints!\n");
-			}
-
-			int watchpoints_used = 5;
-			if (wp->watch_width <= 8) {
-				watchpoints_used = 1; 
-			}
-			if (watchpoints_used > 1) {
-				panic("unable to handle large watchpoints\n");
-			}
-
-			uint64_t new_val = ptrace(PTRACE_PEEKDATA, pid, (void *)var_addr, NULL);
-			if (wp->watch_width == 1) {
-				new_val = (uint8_t)new_val;
-			} else if (wp->watch_width == 2) {
-				new_val = (uint16_t)new_val;
-			} else if (wp->watch_width <= 4) {
-				new_val = (uint32_t)new_val;
-			} else if (wp->watch_width < 8) {
-				panic("do some masking here, I guess?\n");
-			}
-
-			printf("[0x%llx] Variable %s changed to %lu\n", regs.rip, var->name, new_val);
-
-trigger_end:
-			triggerbits = triggerbits >> 1;
-		}
-	}
-
-	uint64_t prev_address = regs.rip - 1;
-	uint64_t prev_inst = ptrace(PTRACE_PEEKDATA, pid, (void *)prev_address, NULL);
-
-	// check if we just stepped over a trap that needs to be patched
-	if ((prev_inst & 0xFF) != 0xCC) {
-		return;
-	}
-
-	cleanup_watchpoints(dbg, pid, prev_address);
-
-	// There should only ever be 1 breakpoint per address
-	// (prevents replacing good orig_data with a trap unintentionally)
-	
-	Breakpoint *break_check = NULL;
-	uint64_t i = 0;
-	for (; i < dbg->break_len; i++) {
-		Breakpoint *br = &dbg->break_table[i];
-
-		if (prev_address == br->address) {
-			break_check = br;
-			break;
-		}
-	}
-	if (!break_check) {
-		panic("Couldn't find breakpoint for 0x%lx?\n", prev_address);
-	}
-
-	ptrace(PTRACE_POKEDATA, pid, (void *)break_check->address, (void *)break_check->orig_data);
-	regs.rip -= 1;
-	ptrace(PTRACE_SETREGS, pid, NULL, &regs);
-
-	if (break_check->ref_count > 0) {
-		dbg->reset_idx = i;
-		dbg->should_reset = true;
-	}
-
-	// Garbage collect breakpoints if they exist. This *shouldn't* cause watch/break indexing issues, 
-	// because the watchpoints referring to the now bad breakpoint idx should already be gone
-	if (!dbg->break_len) {
-		return;
-	}
-
-	for (uint64_t i = dbg->break_len - 1; i > 0; i--) {
-		Breakpoint *br = &dbg->break_table[i];
-		if (br->ref_count == 0) {
-			Breakpoint *end = &dbg->break_table[dbg->break_len];
-			Breakpoint *old = &dbg->break_table[i];
-
-			memcpy(old, end, sizeof(Breakpoint));
-			memset(end, 0, sizeof(Breakpoint));
-			dbg->break_len--;
-		}
-	}
-
-	for (uint64_t i = 0; i < dbg->break_len; i++) {
-		Breakpoint *br = &dbg->break_table[i];
-		if (br->address == prev_address && br->ref_count > 0) {
-			// Adjust reset_idx after GC
-			dbg->reset_idx = i;
-			break;
-		}
-	}
-}
-
 
 void add_watchpoint(DebugState *dbg, int pid, char *var_name) {
 	struct user_regs_struct regs;
@@ -2101,6 +1912,181 @@ void add_watchpoint(DebugState *dbg, int pid, char *var_name) {
 	update_hw_breaks(dbg, pid, framed_scope);
 }
 
+void reset_breakpoint(DebugState *dbg, int pid) {
+	ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
+
+	int status;
+	waitpid(pid, &status, 0);
+	if (!WIFSTOPPED(status)) {
+		panic("Failure to break on watchpoint\n");
+	}
+
+	Breakpoint *br = &dbg->break_table[dbg->reset_idx];
+
+	inject_breakpoint_at_addr(pid, br, br->address);
+
+	dbg->reset_idx = 0;
+	dbg->should_reset = false;
+}
+
+void continue_to_next(DebugState *dbg, int pid) {
+	struct user_regs_struct regs;
+
+
+	if (dbg->should_reset) {
+		reset_breakpoint(dbg, pid);
+	}
+
+	ptrace(PTRACE_CONT, pid, NULL, NULL);
+
+	int status;
+	waitpid(pid, &status, 0);
+	if (!WIFSTOPPED(status)) {
+		int ret_val = WEXITSTATUS(status);
+		happy_death("Program died with return code %d, bye!\n", ret_val);
+	}
+
+	uint64_t dr6 = 0;
+	dr6 = ptrace(PTRACE_PEEKUSER, pid, (void *)offsetof(struct user, u_debugreg[6]), NULL);
+
+	uint32_t triggerbits = dr6 & 0b1111;
+/*
+	int dr7_set        = (dr6 >> 12) & 1;
+	int single_stepped = (dr6 >> 14) & 1;
+*/
+
+	if (ptrace(PTRACE_POKEUSER, pid, (void *)offsetof(struct user, u_debugreg[6]), NULL)) {
+		panic("failed to set up dr6!\n");
+	}
+
+	ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+	if (triggerbits) {
+
+		CurrentScopes scopes = {0};
+		if (!get_scopes(dbg, regs.rip, &scopes)) {
+			printf("Failed to find scope!\n");
+			return;
+		}
+
+		for (uint64_t i = 0; i < dbg->hw_slots_max && triggerbits; i++) {
+			if (!(triggerbits & 0b1)) {
+				goto trigger_end;
+			}
+
+			HWBreak *br = &dbg->hw_slots[i];
+			if (br->type != HWWatchpoint) {
+				goto trigger_end;
+			}
+
+			Watchpoint *wp = &dbg->watch_table[br->idx];
+			Block *var = &dbg->block_table[wp->var_idx];
+
+			// Start evaluating variable location expression using framed scope as reference
+			DWExprMachine em = {0};
+			em.frame_holder = &dbg->block_table[scopes.framed_scope_idx];
+			DWExpression ex = { .expr = var->loc_expr, .len = var->loc_expr_len };
+			eval_expr(&regs, &em, ex, 0);
+			uint64_t var_addr = em.val_stack[0];
+
+			// Determine variable address alignment to figure out how to place variable
+			int is_8b_aligned = (var_addr & 0x7) == 0;
+			int is_4b_aligned = (var_addr & 0x3) == 0;
+			int is_2b_aligned = (var_addr & 0x1) == 0;
+
+			//printf("8 %d, 4 %d, 2 %d\n", is_8b_aligned, is_4b_aligned, is_2b_aligned);
+			if (!(is_8b_aligned || is_4b_aligned || is_2b_aligned || wp->watch_width == 1)) {
+				panic("Unable to handle unaligned watchpoints!\n");
+			}
+
+			int watchpoints_used = 5;
+			if (wp->watch_width <= 8) {
+				watchpoints_used = 1; 
+			}
+			if (watchpoints_used > 1) {
+				panic("unable to handle large watchpoints\n");
+			}
+
+			uint64_t new_val = ptrace(PTRACE_PEEKDATA, pid, (void *)var_addr, NULL);
+			if (wp->watch_width == 1) {
+				new_val = (uint8_t)new_val;
+			} else if (wp->watch_width == 2) {
+				new_val = (uint16_t)new_val;
+			} else if (wp->watch_width <= 4) {
+				new_val = (uint32_t)new_val;
+			} else if (wp->watch_width < 8) {
+				panic("do some masking here, I guess?\n");
+			}
+
+			printf("[0x%llx] Variable %s changed to %lu\n", regs.rip, var->name, new_val);
+
+trigger_end:
+			triggerbits = triggerbits >> 1;
+		}
+	}
+
+	uint64_t prev_address = regs.rip - 1;
+	uint64_t prev_inst = ptrace(PTRACE_PEEKDATA, pid, (void *)prev_address, NULL);
+
+	// check if we just stepped over a trap that needs to be patched
+	if ((prev_inst & 0xFF) != 0xCC) {
+		return;
+	}
+
+	cleanup_watchpoints(dbg, pid, prev_address);
+
+	// There should only ever be 1 breakpoint per address
+	// (prevents replacing good orig_data with a trap unintentionally)
+	
+	Breakpoint *break_check = NULL;
+	uint64_t i = 0;
+	for (; i < dbg->break_len; i++) {
+		Breakpoint *br = &dbg->break_table[i];
+
+		if (prev_address == br->address) {
+			break_check = br;
+			break;
+		}
+	}
+	if (!break_check) {
+		panic("Couldn't find breakpoint for 0x%lx?\n", prev_address);
+	}
+
+	ptrace(PTRACE_POKEDATA, pid, (void *)break_check->address, (void *)break_check->orig_data);
+	regs.rip -= 1;
+	ptrace(PTRACE_SETREGS, pid, NULL, &regs);
+
+	if (break_check->ref_count > 0) {
+		dbg->reset_idx = i;
+		dbg->should_reset = true;
+	}
+
+	// Garbage collect breakpoints if they exist. This *shouldn't* cause watch/break indexing issues, 
+	// because the watchpoints referring to the now bad breakpoint idx should already be gone
+	if (!dbg->break_len) {
+		return;
+	}
+
+	for (uint64_t i = dbg->break_len - 1; i > 0; i--) {
+		Breakpoint *br = &dbg->break_table[i];
+		if (br->ref_count == 0) {
+			Breakpoint *end = &dbg->break_table[dbg->break_len];
+			Breakpoint *old = &dbg->break_table[i];
+
+			memcpy(old, end, sizeof(Breakpoint));
+			memset(end, 0, sizeof(Breakpoint));
+			dbg->break_len--;
+		}
+	}
+
+	for (uint64_t i = 0; i < dbg->break_len; i++) {
+		Breakpoint *br = &dbg->break_table[i];
+		if (br->address == prev_address && br->ref_count > 0) {
+			// Adjust reset_idx after GC
+			dbg->reset_idx = i;
+			break;
+		}
+	}
+}
 
 int main(int argc, char **argv) {
 	if (argc < 2) {

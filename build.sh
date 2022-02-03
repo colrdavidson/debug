@@ -1,4 +1,4 @@
-clang -O0 -g -Wall -Wextra -Wno-unused-function -o debugger main.c
+clang -O0 -g -Wall -Wextra -o debugger main.c
 
 cd tests
 ./build.sh
