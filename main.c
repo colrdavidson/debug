@@ -637,7 +637,7 @@ char *dwarf_line_op_to_str(uint8_t op) {
 }
 
 char *dwarf_expr_op_to_str(uint8_t expr_op) {
-	static char op_str_cache[16];
+	static char op_str_cache[20];
 
 	if (expr_op >= 0x30 && expr_op <= 0x4f) {
 		sprintf(op_str_cache, "DW_OP_lit%d", expr_op - 0x30);
@@ -1691,7 +1691,7 @@ void update_hw_breaks(DebugState *dbg, int pid, Block *framed_scope) {
 	}
 }
 
-static void inject_breakpoint_at_addr(int pid, Breakpoint *br, uint64_t addr) {
+void inject_breakpoint_at_addr(int pid, Breakpoint *br, uint64_t addr) {
 	uint64_t orig_data = (uint64_t)ptrace(PTRACE_PEEKDATA, pid, (void *)addr, NULL);
 
 	// Replace first byte of code at address with int 3
@@ -1703,7 +1703,7 @@ static void inject_breakpoint_at_addr(int pid, Breakpoint *br, uint64_t addr) {
 	br->orig_data = orig_data;
 }
 
-static void add_breakpoint(int pid, Breakpoint *br, uint64_t addr) {
+void add_breakpoint(int pid, Breakpoint *br, uint64_t addr) {
 	if (br->ref_count > 0) {
 		printf("Doing a ref skip!\n");
 		br->ref_count += 1;
@@ -1712,6 +1712,23 @@ static void add_breakpoint(int pid, Breakpoint *br, uint64_t addr) {
 
 	inject_breakpoint_at_addr(pid, br, addr);
 	br->ref_count += 1;
+}
+
+void reset_breakpoint(DebugState *dbg, int pid) {
+	ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
+
+	int status;
+	waitpid(pid, &status, 0);
+	if (!WIFSTOPPED(status)) {
+		panic("Failure to break on watchpoint\n");
+	}
+
+	Breakpoint *br = &dbg->break_table[dbg->reset_idx];
+
+	inject_breakpoint_at_addr(pid, br, br->address);
+
+	dbg->reset_idx = 0;
+	dbg->should_reset = false;
 }
 
 void cleanup_watchpoints(DebugState *dbg, int pid, uint64_t break_addr) {
@@ -1910,23 +1927,6 @@ void add_watchpoint(DebugState *dbg, int pid, char *var_name) {
 	}
 
 	update_hw_breaks(dbg, pid, framed_scope);
-}
-
-void reset_breakpoint(DebugState *dbg, int pid) {
-	ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
-
-	int status;
-	waitpid(pid, &status, 0);
-	if (!WIFSTOPPED(status)) {
-		panic("Failure to break on watchpoint\n");
-	}
-
-	Breakpoint *br = &dbg->break_table[dbg->reset_idx];
-
-	inject_breakpoint_at_addr(pid, br, br->address);
-
-	dbg->reset_idx = 0;
-	dbg->should_reset = false;
 }
 
 void continue_to_next(DebugState *dbg, int pid) {
