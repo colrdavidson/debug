@@ -23,6 +23,17 @@
 #define panic(...) do { dprintf(2, __VA_ARGS__); exit(1); } while (0)
 #define happy_death(...) do { dprintf(2, __VA_ARGS__); exit(0); } while (0)
 
+// GLOBALS
+#define HW_SLOTS_MAX 4
+#define BLOCK_STACK_MAX 20
+#define LINE_TABLES_MAX 20
+#define TYPE_CHAIN_MAX 20
+#define VAL_STACK_MAX 32
+#define BREAKPOINTS_MAX 1024
+#define WATCHPOINTS_MAX 1024
+#define BLOCK_MAX 1024
+#define ABBREV_MAX 1024
+
 enum {
 	SHT_NULL = 0,
 	SHT_PROGBITS,
@@ -190,10 +201,8 @@ typedef struct {
 typedef struct {
 	char *var_name;
 
-	uint64_t start;
+	uint64_t watch_width;
 	uint64_t end;
-
-	int hw_slot;
 
 	// Block idx
 	uint64_t var_idx;
@@ -201,6 +210,20 @@ typedef struct {
 	// Breakpoint idx
 	uint64_t break_idx;
 } Watchpoint;
+
+typedef enum {
+	HWNone = 0x0,
+	HWBreakpoint,
+	HWWatchpoint,
+} HWBreakType;
+
+typedef struct {
+	uint64_t addr;
+
+	uint64_t idx;
+	HWBreakType type;
+} HWBreak;
+
 
 typedef enum {
 	DWString,
@@ -243,6 +266,11 @@ typedef struct {
 } FuncFrame;
 
 typedef struct {
+	uint64_t framed_scope_idx;
+	uint64_t scope_idx;
+} CurrentScopes;
+
+typedef struct {
 	DWSections sections;
 
 	Block *block_table;
@@ -261,13 +289,11 @@ typedef struct {
 	uint64_t watch_len;
 	uint64_t watch_max;
 
-	FuncFrame main_frame;
-	bool found_main;
-
 	bool should_reset;
 	uint64_t reset_idx;
 
-	int8_t hw_watch_slots;
+	HWBreak hw_slots[HW_SLOTS_MAX];
+	uint64_t hw_slots_max;
 } DebugState;
 
 #define DWARF_FORM \
@@ -417,15 +443,6 @@ enum { DWARF_OP };
 #undef X
 
 
-// GLOBALS
-#define BLOCK_MAX 1024
-#define ABBREV_MAX 1024
-#define BLOCK_STACK_MAX 20
-#define LINE_TABLES_MAX 20
-#define TYPE_CHAIN_MAX 20
-#define VAL_STACK_MAX 32
-#define BREAKPOINTS_MAX 1024
-#define WATCHPOINTS_MAX 1024
 
 
 uint64_t get_regval_for_dwarf_reg(struct user_regs_struct *regs, uint8_t idx) {
@@ -658,7 +675,6 @@ static void inject_breakpoint_at_addr(int pid, Breakpoint *br, uint64_t addr) {
 
 	// Replace first byte of code at address with int 3
 	uint64_t data_with_trap = (orig_data & (~0xFF)) | 0xCC;
-	printf("Injected breakpoint @ 0x%lx\n", addr);
 
 	ptrace(PTRACE_POKEDATA, pid, (void *)addr, (void *)data_with_trap);
 
@@ -1509,19 +1525,6 @@ uint64_t find_line_addr_in_file(DebugState *dbg, char *break_file, uint32_t brea
 	return break_addr;
 }
 
-FuncFrame *find_function_frame(Block *block_table, uint64_t block_len, char *func_name, FuncFrame *ff) {
-	for (uint64_t i = 0; i < block_len; i++) {
-		Block *block = &block_table[i];
-		if (block->type == DW_TAG_subprogram && block->name && strcmp(block->name, func_name) == 0) {
-			ff->start = block->low_pc;
-			ff->end = block->low_pc + block->high_pc;
-			return ff;
-		}
-	}
-
-	return NULL;
-}
-
 void get_approx_line_for_addr(DebugState *dbg, uint64_t addr, LineMachine **lm) {
 	for (uint64_t i = 0; i < dbg->line_tables_len; i++) {
 		CULineTable *line_table = &dbg->line_tables[i];
@@ -1539,229 +1542,53 @@ void get_approx_line_for_addr(DebugState *dbg, uint64_t addr, LineMachine **lm) 
 	*lm = NULL;
 }
 
-void cleanup_watchpoints(DebugState *dbg, uint64_t break_addr) {
-	// Nothing to clean up
-	if (!dbg->watch_len) {
-		return;
-	}
-
-	printf("Cleaning up watchpoints!\n");
-	// Find the breakpoint attached to this address
-	uint64_t break_idx = (uint64_t)~0;
-	for (uint64_t i = 0; i < dbg->break_len; i++) {
-		Breakpoint *br = &dbg->break_table[i];
-		if (br->address == break_addr) {
-			break_idx = i;
-			break;
+FuncFrame *find_function_frame(Block *block_table, uint64_t block_len, char *func_name, FuncFrame *ff) {
+	for (uint64_t i = 0; i < block_len; i++) {
+		Block *block = &block_table[i];
+		if (block->type == DW_TAG_subprogram && block->name && strcmp(block->name, func_name) == 0) {
+			ff->start = block->low_pc;
+			ff->end = block->low_pc + block->high_pc;
+			return ff;
 		}
 	}
-	// Address didn't have any breakpoints
-	if (break_idx == (uint64_t)~0) {
-		return;
-	}
 
-	// Get all watchpoints associated with breakpoint, clean up, and remove breakpoint if ref <= 0
-	Breakpoint *br = &dbg->break_table[break_idx];
-	for (uint64_t j = dbg->watch_len - 1; j > 0; j--) {
-		Watchpoint *wp = &dbg->watch_table[j];
-		if (wp->break_idx == break_idx) {
-			printf("Removing watchpoint %lu\n", j);
-			Watchpoint *end = &dbg->watch_table[dbg->watch_len];
-			Watchpoint *old = &dbg->watch_table[j];
-
-			memcpy(old, end, sizeof(Breakpoint));
-			memset(end, 0, sizeof(Breakpoint));
-			dbg->watch_len--;
-
-			printf("Reducing breakpoint %lu refcount %lu -> %lu\n", break_idx, br->ref_count, br->ref_count - 1);
-			br->ref_count -= 1;
-		}
-	}
+	return NULL;
 }
 
-void init_debug_state(DebugState *dbg, char *bin_name) {
-	load_elf_sections(&dbg->sections, bin_name);
+FuncFrame *find_function_frame_approx(DebugState *dbg, char *func_name, FuncFrame *ff) {
+	if (find_function_frame(dbg->block_table, dbg->block_len, func_name, ff)) {
+		ff->start += 4;
 
-	dbg->block_max = BLOCK_MAX;
-	dbg->block_table = (Block *)calloc(sizeof(Block), dbg->block_max);
-	dbg->block_len = 0;
-	build_block_table(&dbg->sections, &dbg->block_table, &dbg->block_len, &dbg->block_max);
+		LineMachine *lm = NULL;
+		get_approx_line_for_addr(dbg, ff->start, &lm);
+		if (!lm) {
+			panic("failed to get line for address!\n");
+		}
 
-	dbg->line_tables_max = LINE_TABLES_MAX;
-	dbg->line_tables = (CULineTable *)malloc(sizeof(CULineTable) * dbg->line_tables_max);
-	dbg->line_tables_len = 0;
-	build_line_tables(&dbg->sections, &dbg->line_tables, &dbg->line_tables_len, &dbg->line_tables_max);
+		if (ff->end > lm->address) {
+			ff->start = lm->address;
+		}
 
-	dbg->break_max = BREAKPOINTS_MAX;
-	dbg->break_table = (Breakpoint *)calloc(sizeof(Breakpoint), dbg->break_max);
-	dbg->break_len = 0;
+		ff->end -= 1;
+		return ff;
+	}
 
-	dbg->watch_max = WATCHPOINTS_MAX;
-	dbg->watch_table = (Watchpoint *)calloc(sizeof(Watchpoint), dbg->watch_max);
-	dbg->watch_len = 0;
-
-
-	dbg->reset_idx = 0;
-	dbg->should_reset = false;
+	return NULL;
 }
 
-void reset_breakpoint(DebugState *dbg, int pid) {
-	ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
-
-	int status;
-	waitpid(pid, &status, 0);
-	if (!WIFSTOPPED(status)) {
-		panic("Failure to break on watchpoint\n");
-	}
-
-	Breakpoint *br = &dbg->break_table[dbg->reset_idx];
-
-	inject_breakpoint_at_addr(pid, br, br->address);
-	printf("Breakpoint restored\n");
-
-	dbg->reset_idx = 0;
-	dbg->should_reset = false;
-}
-
-void continue_to_next(DebugState *dbg, int pid) {
-	struct user_regs_struct regs;
-
-	if (dbg->should_reset) {
-		reset_breakpoint(dbg, pid);
-	}
-
-	ptrace(PTRACE_CONT, pid, NULL, NULL);
-
-	int status;
-	waitpid(pid, &status, 0);
-	if (!WIFSTOPPED(status)) {
-		int ret_val = WEXITSTATUS(status);
-		happy_death("Program died with return code %d, bye!\n", ret_val);
-	}
-
-
-	
-	// TODO Check watchpoints via DR6 here
-	/*
-	uint64_t tmp_val = ptrace(PTRACE_PEEKDATA, pid, (void *)var_addr, NULL);
-	if (type_blk->type_width == 4) {
-		tmp_val = (uint32_t)tmp_val;
-	} else if (type_blk->type_width == 2) {
-		tmp_val = (uint16_t)tmp_val;
-	}
-
-	printf("CHANGE DETECTED: Variable %s in %s @ 0x%lx; %lu\n", var_block->name, framed_scope->name, var_addr, tmp_val);
-	*/
-
-
-	ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-	printf("PRE-STEP RIP: %llx\n", regs.rip);
-	uint64_t prev_address = regs.rip - 1;
-	uint64_t prev_inst = ptrace(PTRACE_PEEKDATA, pid, (void *)prev_address, NULL);
-
-	// check if we just stepped over a trap that needs to be patched
-	if ((prev_inst & 0xFF) != 0xCC) {
-		return;
-	}
-
-	printf("just hit a trap @ %lx\n", prev_address);
-	cleanup_watchpoints(dbg, prev_address);
-
-	// There should only ever be 1 breakpoint per address
-	// (prevents replacing good orig_data with a trap unintentionally)
-	
-	Breakpoint *break_check = NULL;
-	uint64_t i = 0;
-	for (; i < dbg->break_len; i++) {
-		Breakpoint *br = &dbg->break_table[i];
-		printf("Checking breakpoint %lu @ 0x%lx for patching\n", i, br->address);
-
-		if (prev_address == br->address) {
-			break_check = br;
-			break;
-		}
-	}
-	if (!break_check) {
-		panic("Couldn't find breakpoint for 0x%lx?\n", prev_address);
-	}
-
-	printf("Patching up breakpoint %lu with data 0x%lx\n", i, break_check->orig_data);
-	ptrace(PTRACE_POKEDATA, pid, (void *)break_check->address, (void *)break_check->orig_data);
-	regs.rip -= 1;
-	ptrace(PTRACE_SETREGS, pid, NULL, &regs);
-
-	uint64_t new_inst = ptrace(PTRACE_PEEKDATA, pid, (void *)regs.rip, NULL);
-	printf("fixed instruction: %lx @ 0x%llx\n", new_inst, regs.rip);
-
-	if (break_check->ref_count > 0) {
-		dbg->reset_idx = i;
-		dbg->should_reset = true;
-	}
-
-	// Garbage collect breakpoints if they exist. This *shouldn't* cause watch/break indexing issues, 
-	// because the watchpoints referring to the now bad breakpoint idx should already be gone
-	if (!dbg->break_len) {
-		return;
-	}
-
-	for (uint64_t i = dbg->break_len - 1; i > 0; i--) {
-		Breakpoint *br = &dbg->break_table[i];
-		printf("Checking breakpoint %lu for cleanup\n", i);
-		if (br->ref_count == 0) {
-			printf("Removing breakpoint %lu\n", i);
-			Breakpoint *end = &dbg->break_table[dbg->break_len];
-			Breakpoint *old = &dbg->break_table[i];
-
-			memcpy(old, end, sizeof(Breakpoint));
-			memset(end, 0, sizeof(Breakpoint));
-			dbg->break_len--;
-		}
-	}
-
-	for (uint64_t i = 0; i < dbg->break_len; i++) {
-		Breakpoint *br = &dbg->break_table[i];
-		if (br->address == prev_address && br->ref_count > 0) {
-			// Adjust reset_idx after GC
-			dbg->reset_idx = i;
-			break;
-		}
-	}
-}
-
-void add_watchpoint(DebugState *dbg, int pid, char *var_name) {
-	struct user_regs_struct regs;
-
-/* 
- * first time entry: add to watchpoint list, set breakpoint when watchpoint leaves scope
- * on wakeup: check if data at watchpoint addresses have changed, report
- * on breakpoint trigger: check for and cleanup watchpoints that are out of scope
- *
- * 	 This gnarly code determines these pieces of 
- * 	 critical information to figure out variable
- * 	 and current scope context from RIP via block_table
- *
- *   framed_scope_block -- contains frame_base_expr
- *   	scope_block -- may only contain high/low pc
- *   		<undefined>
- *   			<undefined>
- *   			var_block -- contains location expr
- */
-
-	ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-	
-	// Find current scope based on RIP
+CurrentScopes *get_scopes(DebugState *dbg, uint64_t addr, CurrentScopes *sp) {
 	uint64_t blk_idx = dbg->block_len - 1;
 	Block *scope_block = NULL;
 	for (; blk_idx > 0; blk_idx--) {
 		Block *blk = &dbg->block_table[blk_idx];
-		if ((regs.rip >= blk->low_pc) && (regs.rip <= (blk->low_pc + blk->high_pc))) {
+		if ((addr >= blk->low_pc) && (addr <= (blk->low_pc + blk->high_pc))) {
 			scope_block = blk;
 			break;
 		}
 	}
 	if (scope_block == NULL) {
 		printf("Unable to find current scope!\n");
-		return;
+		return NULL;
 	}
 
 	uint64_t scope_idx = blk_idx;
@@ -1791,12 +1618,352 @@ void add_watchpoint(DebugState *dbg, int pid, char *var_name) {
 		}
 	}
 
-	if (scope_idx == framed_scope_idx) {
-		printf("Currently in framed scope %lu, %s\n", framed_scope_idx, framed_scope->name);
-	} else {
-		printf("Currently in subscope %lu of framed scope %lu, %s\n", scope_idx, framed_scope_idx, framed_scope->name);
+	sp->scope_idx = scope_idx;
+	sp->framed_scope_idx = framed_scope_idx;
+
+	return sp;
+}
+
+// Intel Vol. 3B 17-5 - PG 3433-3434
+void update_hw_breaks(DebugState *dbg, int pid, Block *framed_scope) {
+
+	struct user_regs_struct regs;
+	ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+
+	if (dbg->watch_len > 4) {
+		panic("TODO Can't handle software watchpoints yet!\n");
 	}
 
+	memset(&dbg->hw_slots, 0, sizeof(dbg->hw_slots));
+	int hw_slots_len = 0;
+
+	uint64_t dr7 = 0b00000000000000010000000100000000;
+	for (uint64_t i = 0; i < dbg->watch_len; i++) {
+		Watchpoint *wp = &dbg->watch_table[i];
+		Block *var = &dbg->block_table[wp->var_idx];
+
+		// Start evaluating variable location expression using framed scope as reference
+		DWExprMachine em = {0};
+		em.frame_holder = framed_scope;
+		DWExpression ex = { .expr = var->loc_expr, .len = var->loc_expr_len };
+		eval_expr(&regs, &em, ex, 0);
+
+		uint64_t var_addr = em.val_stack[0];
+
+		// Determine variable address alignment to figure out how to place variable
+		int is_8b_aligned = (var_addr & 0x7) == 0;
+		int is_4b_aligned = (var_addr & 0x3) == 0;
+		int is_2b_aligned = (var_addr & 0x1) == 0;
+
+		//printf("8 %d, 4 %d, 2 %d\n", is_8b_aligned, is_4b_aligned, is_2b_aligned);
+		if (!(is_8b_aligned || is_4b_aligned || is_2b_aligned || wp->watch_width == 1)) {
+			panic("Unable to handle unaligned watchpoints!\n");
+		}
+
+		char width_bits = 0;
+		int watchpoints_used = 5;
+		if (wp->watch_width == 8) { width_bits = 0b10; watchpoints_used = 1; }
+		else if (wp->watch_width == 4) { width_bits = 0b11; watchpoints_used = 1; }
+		else if (wp->watch_width == 2) { width_bits = 0b01; watchpoints_used = 1; }
+		else if (wp->watch_width == 1) { width_bits = 0b00; watchpoints_used = 1; }
+		else if (wp->watch_width > 8 && (wp->watch_width % 8) == 0) {
+			width_bits = 0b10;
+			watchpoints_used = wp->watch_width / 8;
+		} else {
+			panic("unable to handle unaligned variables!\n");
+		}
+		if (watchpoints_used > 1) {
+			panic("unable to handle large watchpoints\n");
+		}
+
+		HWBreak *br = &dbg->hw_slots[hw_slots_len];
+		br->type = HWWatchpoint;
+		br->idx = i;
+		hw_slots_len++;
+		
+		// set: width | watch type (write only) | # register enable
+		dr7 |= (width_bits << (18 + (4 * i))) | (0b01 << (16 + (4 * i))) | (0b1 << (2 * i));
+		ptrace(PTRACE_POKEUSER, pid, (void *)offsetof(struct user, u_debugreg[i]), (void *)var_addr);
+	}
+
+	printf("Setting dr7 to 0x%lx -- %lu watchpoints\n", dr7, dbg->watch_len);
+	if (ptrace(PTRACE_POKEUSER, pid, (void *)offsetof(struct user, u_debugreg[7]), (void *)dr7) == -1) {
+		panic("Failed to set dr7 correctly!\n");
+	}
+	if (ptrace(PTRACE_POKEUSER, pid, (void *)offsetof(struct user, u_debugreg[6]), NULL)) {
+		panic("failed to zero dr6!\n");
+	}
+}
+
+void cleanup_watchpoints(DebugState *dbg, int pid, uint64_t break_addr) {
+	// Nothing to clean up
+	if (!dbg->watch_len) {
+		return;
+	}
+
+	// Find the breakpoint attached to this address
+	uint64_t break_idx = (uint64_t)~0;
+	for (uint64_t i = 0; i < dbg->break_len; i++) {
+		Breakpoint *br = &dbg->break_table[i];
+		if (br->address == break_addr) {
+			break_idx = i;
+			break;
+		}
+	}
+	// Address didn't have any breakpoints
+	if (break_idx == (uint64_t)~0) {
+		return;
+	}
+
+	// Get all watchpoints associated with breakpoint, clean up, and remove breakpoint if ref <= 0
+	Breakpoint *br = &dbg->break_table[break_idx];
+	for (uint64_t j = dbg->watch_len - 1; j > 0; j--) {
+		Watchpoint *wp = &dbg->watch_table[j];
+		if (wp->break_idx == break_idx) {
+			Watchpoint *end = &dbg->watch_table[dbg->watch_len];
+			Watchpoint *old = &dbg->watch_table[j];
+
+			memcpy(old, end, sizeof(Breakpoint));
+			memset(end, 0, sizeof(Breakpoint));
+			dbg->watch_len--;
+
+			br->ref_count -= 1;
+		}
+	}
+
+	CurrentScopes scopes = {0};
+	if (!get_scopes(dbg, break_addr, &scopes)) {
+		printf("Failed to find scope!\n");
+		return;
+	}
+
+	update_hw_breaks(dbg, pid, &dbg->block_table[scopes.framed_scope_idx]);
+}
+
+void init_debug_state(DebugState *dbg, char *bin_name) {
+	load_elf_sections(&dbg->sections, bin_name);
+
+	dbg->block_max = BLOCK_MAX;
+	dbg->block_table = (Block *)calloc(sizeof(Block), dbg->block_max);
+	dbg->block_len = 0;
+	build_block_table(&dbg->sections, &dbg->block_table, &dbg->block_len, &dbg->block_max);
+
+	dbg->line_tables_max = LINE_TABLES_MAX;
+	dbg->line_tables = (CULineTable *)malloc(sizeof(CULineTable) * dbg->line_tables_max);
+	dbg->line_tables_len = 0;
+	build_line_tables(&dbg->sections, &dbg->line_tables, &dbg->line_tables_len, &dbg->line_tables_max);
+
+	dbg->break_max = BREAKPOINTS_MAX;
+	dbg->break_table = (Breakpoint *)calloc(sizeof(Breakpoint), dbg->break_max);
+	dbg->break_len = 0;
+
+	dbg->watch_max = WATCHPOINTS_MAX;
+	dbg->watch_table = (Watchpoint *)calloc(sizeof(Watchpoint), dbg->watch_max);
+	dbg->watch_len = 0;
+
+	memset(dbg->hw_slots, 0, sizeof(dbg->hw_slots));
+	dbg->hw_slots_max = HW_SLOTS_MAX;
+
+	dbg->reset_idx = 0;
+	dbg->should_reset = false;
+}
+
+void reset_breakpoint(DebugState *dbg, int pid) {
+	ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
+
+	int status;
+	waitpid(pid, &status, 0);
+	if (!WIFSTOPPED(status)) {
+		panic("Failure to break on watchpoint\n");
+	}
+
+	Breakpoint *br = &dbg->break_table[dbg->reset_idx];
+
+	inject_breakpoint_at_addr(pid, br, br->address);
+
+	dbg->reset_idx = 0;
+	dbg->should_reset = false;
+}
+
+
+void continue_to_next(DebugState *dbg, int pid) {
+	struct user_regs_struct regs;
+
+
+	if (dbg->should_reset) {
+		reset_breakpoint(dbg, pid);
+	}
+
+	ptrace(PTRACE_CONT, pid, NULL, NULL);
+
+	int status;
+	waitpid(pid, &status, 0);
+	if (!WIFSTOPPED(status)) {
+		int ret_val = WEXITSTATUS(status);
+		happy_death("Program died with return code %d, bye!\n", ret_val);
+	}
+
+	uint64_t dr6 = 0;
+	dr6 = ptrace(PTRACE_PEEKUSER, pid, (void *)offsetof(struct user, u_debugreg[6]), NULL);
+
+	uint32_t triggerbits = dr6 & 0b1111;
+/*
+	int dr7_set        = (dr6 >> 12) & 1;
+	int single_stepped = (dr6 >> 14) & 1;
+*/
+
+	if (ptrace(PTRACE_POKEUSER, pid, (void *)offsetof(struct user, u_debugreg[6]), NULL)) {
+		panic("failed to set up dr6!\n");
+	}
+
+	ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+	if (triggerbits) {
+		struct user_regs_struct regs;
+		ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+
+		CurrentScopes scopes = {0};
+		if (!get_scopes(dbg, regs.rip, &scopes)) {
+			printf("Failed to find scope!\n");
+			return;
+		}
+
+		for (uint64_t i = 0; i < dbg->hw_slots_max && triggerbits; i++) {
+			if (!(triggerbits & 0b1)) {
+				goto trigger_end;
+			}
+
+			HWBreak *br = &dbg->hw_slots[i];
+			if (br->type != HWWatchpoint) {
+				goto trigger_end;
+			}
+
+			Watchpoint *wp = &dbg->watch_table[br->idx];
+			Block *var = &dbg->block_table[wp->var_idx];
+
+			// Start evaluating variable location expression using framed scope as reference
+			DWExprMachine em = {0};
+			em.frame_holder = &dbg->block_table[scopes.framed_scope_idx];
+			DWExpression ex = { .expr = var->loc_expr, .len = var->loc_expr_len };
+			eval_expr(&regs, &em, ex, 0);
+			uint64_t var_addr = em.val_stack[0];
+
+			// Determine variable address alignment to figure out how to place variable
+			int is_8b_aligned = (var_addr & 0x7) == 0;
+			int is_4b_aligned = (var_addr & 0x3) == 0;
+			int is_2b_aligned = (var_addr & 0x1) == 0;
+
+			//printf("8 %d, 4 %d, 2 %d\n", is_8b_aligned, is_4b_aligned, is_2b_aligned);
+			if (!(is_8b_aligned || is_4b_aligned || is_2b_aligned || wp->watch_width == 1)) {
+				panic("Unable to handle unaligned watchpoints!\n");
+			}
+
+			int watchpoints_used = 5;
+			if (wp->watch_width <= 8) {
+				watchpoints_used = 1; 
+			}
+			if (watchpoints_used > 1) {
+				panic("unable to handle large watchpoints\n");
+			}
+
+			uint64_t new_val = ptrace(PTRACE_PEEKDATA, pid, (void *)var_addr, NULL);
+			if (wp->watch_width == 1) {
+				new_val = (uint8_t)new_val;
+			} else if (wp->watch_width == 2) {
+				new_val = (uint16_t)new_val;
+			} else if (wp->watch_width <= 4) {
+				new_val = (uint32_t)new_val;
+			} else if (wp->watch_width < 8) {
+				panic("do some masking here, I guess?\n");
+			}
+
+			printf("[0x%llx] Variable %s changed to %lu\n", regs.rip, var->name, new_val);
+
+trigger_end:
+			triggerbits = triggerbits >> 1;
+		}
+	}
+
+	uint64_t prev_address = regs.rip - 1;
+	uint64_t prev_inst = ptrace(PTRACE_PEEKDATA, pid, (void *)prev_address, NULL);
+
+	// check if we just stepped over a trap that needs to be patched
+	if ((prev_inst & 0xFF) != 0xCC) {
+		return;
+	}
+
+	cleanup_watchpoints(dbg, pid, prev_address);
+
+	// There should only ever be 1 breakpoint per address
+	// (prevents replacing good orig_data with a trap unintentionally)
+	
+	Breakpoint *break_check = NULL;
+	uint64_t i = 0;
+	for (; i < dbg->break_len; i++) {
+		Breakpoint *br = &dbg->break_table[i];
+
+		if (prev_address == br->address) {
+			break_check = br;
+			break;
+		}
+	}
+	if (!break_check) {
+		panic("Couldn't find breakpoint for 0x%lx?\n", prev_address);
+	}
+
+	ptrace(PTRACE_POKEDATA, pid, (void *)break_check->address, (void *)break_check->orig_data);
+	regs.rip -= 1;
+	ptrace(PTRACE_SETREGS, pid, NULL, &regs);
+
+	uint64_t new_inst = ptrace(PTRACE_PEEKDATA, pid, (void *)regs.rip, NULL);
+
+	if (break_check->ref_count > 0) {
+		dbg->reset_idx = i;
+		dbg->should_reset = true;
+	}
+
+	// Garbage collect breakpoints if they exist. This *shouldn't* cause watch/break indexing issues, 
+	// because the watchpoints referring to the now bad breakpoint idx should already be gone
+	if (!dbg->break_len) {
+		return;
+	}
+
+	for (uint64_t i = dbg->break_len - 1; i > 0; i--) {
+		Breakpoint *br = &dbg->break_table[i];
+		if (br->ref_count == 0) {
+			Breakpoint *end = &dbg->break_table[dbg->break_len];
+			Breakpoint *old = &dbg->break_table[i];
+
+			memcpy(old, end, sizeof(Breakpoint));
+			memset(end, 0, sizeof(Breakpoint));
+			dbg->break_len--;
+		}
+	}
+
+	for (uint64_t i = 0; i < dbg->break_len; i++) {
+		Breakpoint *br = &dbg->break_table[i];
+		if (br->address == prev_address && br->ref_count > 0) {
+			// Adjust reset_idx after GC
+			dbg->reset_idx = i;
+			break;
+		}
+	}
+}
+
+
+void add_watchpoint(DebugState *dbg, int pid, char *var_name) {
+	struct user_regs_struct regs;
+	ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+
+	CurrentScopes scopes = {0};
+	if (!get_scopes(dbg, regs.rip, &scopes)) {
+		printf("Failed to find scope!\n");
+		return;
+	}
+
+	Block *framed_scope = &dbg->block_table[scopes.framed_scope_idx];
+	Block *scope_block = &dbg->block_table[scopes.scope_idx];
+
+	uint64_t blk_idx = scopes.scope_idx;
 
 	// Find variable in scope by descending tree from scope_block (can pass into other scopes)
 	Block *var_block = NULL;
@@ -1810,7 +1977,7 @@ void add_watchpoint(DebugState *dbg, int pid, char *var_name) {
 
 	// Try using the framed scope idx instead if we couldn't find it in the lexical scope
 	if (var_block == NULL) {
-		blk_idx = framed_scope_idx;
+		blk_idx = scopes.framed_scope_idx;
 		for (; blk_idx < dbg->block_len; blk_idx++) {
 			Block *blk = &dbg->block_table[blk_idx];
 			if (blk->name && strcmp(blk->name, var_name) == 0) {
@@ -1825,14 +1992,12 @@ void add_watchpoint(DebugState *dbg, int pid, char *var_name) {
 	}
 
 	uint64_t var_idx = blk_idx;
-	printf("Found variable %lu, %s\n", var_idx, var_block->name);
 
 	// Walk parent_idx to confirm that variable obtained in last pass belongs to current scope
 	Block *tmp_var_block = var_block;
 	uint64_t tmp_var_block_idx = var_idx;
 	for (;;) {
-		printf("-- block %lu | frame %lu | scope %lu\n", tmp_var_block_idx, framed_scope_idx, scope_idx);
-		if (scope_idx == tmp_var_block_idx || framed_scope_idx == tmp_var_block_idx) {
+		if (scopes.scope_idx == tmp_var_block_idx || scopes.framed_scope_idx == tmp_var_block_idx) {
 			break;
 		}
 
@@ -1853,35 +2018,33 @@ void add_watchpoint(DebugState *dbg, int pid, char *var_name) {
 	}
 	
 	Watchpoint *var_watch = NULL;
+	uint64_t watch_idx = 0;
 	for (uint64_t i = 0; i < dbg->watch_len; i++) {
 		Watchpoint *wp = &dbg->watch_table[i];
 		if (wp->var_idx == var_idx) {
 			var_watch = wp;
+			watch_idx = i;
 			break;
 		}
 	}
 	if (var_watch == NULL) {
-		printf("Adding a watchpoint for scope %lu, var %lu\n", scope_idx, var_idx);
-
 		// If this is a function, add buffer zone for the pre/postambles
-		uint64_t start, end;
-		if (framed_scope_idx == scope_idx) {
+		uint64_t end;
+		if (scopes.framed_scope_idx == scopes.scope_idx) {
 			FuncFrame ff = {0};
-			if (!find_function_frame(dbg->block_table, dbg->block_len, framed_scope->name, &ff)) {
+			if (!find_function_frame_approx(dbg, framed_scope->name, &ff)) {
 				panic("Failed to find function frame for function\n");
 			}
 
-			start = ff.start;
 			end = ff.end;
 		} else {
-			start = scope_block->low_pc;
 			end = scope_block->low_pc + scope_block->high_pc;
 		}
 
 		Watchpoint *wp = &dbg->watch_table[dbg->watch_len];
-		wp->start = start;
 		wp->end = end;
 		wp->var_idx = var_idx;
+		watch_idx = dbg->watch_len;
 
 		// establish a breakpoint so we can clean up the watchpoint when it drops out of scope
 		wp->break_idx = (uint64_t)~0;
@@ -1902,96 +2065,44 @@ void add_watchpoint(DebugState *dbg, int pid, char *var_name) {
 			add_breakpoint(pid, br, wp->end);
 			dbg->break_len++;
 		}
+		
+		// Build out list of all type data for variable
+		uint64_t type_chain[TYPE_CHAIN_MAX] = {0};
+		uint64_t type_chain_len = 0;
+
+		Block *tmp_block = var_block;
+		for (;;) {
+			if (!tmp_block->type_idx) {
+				break;
+			}
+
+			type_chain[type_chain_len++] = tmp_block->type_idx;
+			tmp_block = &dbg->block_table[tmp_block->type_idx];
+		}
+
+/*
+		for (uint64_t i = type_chain_len - 1; i >= 0; i--) {
+			Block *type = &dbg->block_table[type_chain[i]];
+			if (type->type == DW_TAG_structure_type) {
+				printf("struct ");
+			} else {
+				printf("%s ", type->name);
+			}
+
+			if (i == 0) break;
+		}
+		printf("%s;\n", var_block->name);
+*/
+
+		wp->watch_width = dbg->block_table[type_chain[type_chain_len - 1]].type_width;
 
 		dbg->watch_len++;
 		var_watch = wp;
 	}
 
-	LineMachine *lm = NULL;
-	get_approx_line_for_addr(dbg, regs.rip, &lm);
-	if (!lm) {
-		panic("failed to get line for address!\n");
-	}
-
-	printf("current == 0x%llx, watch end == 0x%lx || line %u\n", regs.rip, var_watch->end, lm->line_num);
-	if (var_watch->end < regs.rip) {
-		panic("watchpoint misaligned with rip!\n");
-	}
-
-	// Start evaluating variable location expression using framed scope as reference
-	DWExprMachine em = {0};
-	em.frame_holder = framed_scope;
-	DWExpression ex = { .expr = var_block->loc_expr, .len = var_block->loc_expr_len };
-	eval_expr(&regs, &em, ex, 0);
-
-	uint64_t var_addr = em.val_stack[0];
-
-	// Build out list of all type data for variable
-	uint64_t type_chain[TYPE_CHAIN_MAX] = {0};
-	uint64_t type_chain_len = 0;
-
-	Block *tmp_block = var_block;
-	for (;;) {
-		if (!tmp_block->type_idx) {
-			break;
-		}
-
-		type_chain[type_chain_len++] = tmp_block->type_idx;
-		tmp_block = &dbg->block_table[tmp_block->type_idx];
-	}
-
-	for (uint64_t i = type_chain_len - 1; i >= 0; i--) {
-		Block *type = &dbg->block_table[type_chain[i]];
-		if (type->type == DW_TAG_structure_type) {
-			printf("struct ");
-		} else {
-			printf("%s ", type->name);
-		}
-
-		if (i == 0) break;
-	}
-	printf("%s;\n", var_block->name);
-
-	uint64_t type_width = dbg->block_table[type_chain[type_chain_len - 1]].type_width;
-
-	// Determine variable address alignment to figure out how to place variable
-	int is_8b_aligned = (var_addr & 0x7) == 0;
-	int is_4b_aligned = (var_addr & 0x3) == 0;
-	int is_2b_aligned = (var_addr & 0x1) == 0;
-
-	//printf("8 %d, 4 %d, 2 %d\n", is_8b_aligned, is_4b_aligned, is_2b_aligned);
-
-	if (!(is_8b_aligned || is_4b_aligned || is_2b_aligned || type_width == 1)) {
-		panic("Unable to handle unaligned watchpoints!\n");
-	}
-
-	printf("Type width: %lu\n", type_width);
-
-	// Intel Vol. 3B 17-5 - PG 3433-3434
-	char width_bits = 0;
-	int watchpoints_used = 5;
-	if (type_width == 8) { width_bits = 0b10; watchpoints_used = 1; }
-	else if (type_width == 4) { width_bits = 0b11; watchpoints_used = 1; }
-	else if (type_width == 2) { width_bits = 0b01; watchpoints_used = 1; }
-	else if (type_width == 1) { width_bits = 0b00; watchpoints_used = 1; }
-	else if (type_width > 8 && (type_width % 8) == 0) {
-		width_bits = 0b10;
-		watchpoints_used = type_width / 8;
-	}
-	if (watchpoints_used > 4 || dbg->hw_watch_slots - watchpoints_used > 0) {
-		panic("Unable to handle width %lu\n", type_width);
-	}
-	dbg->hw_watch_slots -= watchpoints_used;
-
-	// trap with breakpoint 0, write only
-	uint64_t dr7 = 0b00000000000000010000001000000001;
-	dr7 |= (width_bits << 18);
-
-	ptrace(PTRACE_POKEUSER, pid, (void *)offsetof(struct user, u_debugreg[0]), (void *)var_addr);
-	if (ptrace(PTRACE_POKEUSER, pid, (void *)offsetof(struct user, u_debugreg[7]), (void *)dr7) == -1) {
-		panic("Failed to set dr7 correctly!\n");
-	}
+	update_hw_breaks(dbg, pid, framed_scope);
 }
+
 
 int main(int argc, char **argv) {
 	if (argc < 2) {
@@ -2021,23 +2132,18 @@ int main(int argc, char **argv) {
 	print_block_table(dbg.block_table, dbg.block_len);
 
 	FuncFrame main_frame = {0};
-	if (find_function_frame(dbg.block_table, dbg.block_len, "main", &main_frame)) {
-		// Set trap on main end so we don't have to wait through libc pre and postamble
-		printf("Found frame for main: 0x%lx - 0x%lx!\n", main_frame.start, main_frame.end);
+	if (find_function_frame_approx(&dbg, "main", &main_frame)) {
 
+		// Set trap on main end so we don't have to wait through libc pre and postamble
 		Breakpoint *br = &dbg.break_table[dbg.break_len++];
 		add_breakpoint(pid, br, main_frame.start);
-
-		Breakpoint *br2 = &dbg.break_table[dbg.break_len++];
-		add_breakpoint(pid, br2, main_frame.end);
 	}
 
 	continue_to_next(&dbg, pid);
-	printf("In main scope\n");
 	add_watchpoint(&dbg, pid, "foo");
+	add_watchpoint(&dbg, pid, "bar");
 
 	for (;;) {
-		printf("Going to next breakpoint\n");
 		continue_to_next(&dbg, pid);
 	}
 }
