@@ -201,6 +201,7 @@ typedef struct {
 typedef struct {
 	char *var_name;
 
+	uint64_t old_data;
 	uint64_t watch_width;
 	uint64_t end;
 
@@ -1673,6 +1674,18 @@ void update_hw_breaks(DebugState *dbg, int pid, Block *framed_scope) {
 		br->type = HWWatchpoint;
 		br->idx = i;
 		hw_slots_len++;
+
+		uint64_t cur_val = ptrace(PTRACE_PEEKDATA, pid, (void *)var_addr, NULL);
+		if (wp->watch_width == 1) {
+			cur_val = (uint8_t)cur_val;
+		} else if (wp->watch_width == 2) {
+			cur_val = (uint16_t)cur_val;
+		} else if (wp->watch_width <= 4) {
+			cur_val = (uint32_t)cur_val;
+		} else if (wp->watch_width < 8) {
+			panic("do some masking here, I guess?\n");
+		}
+		wp->old_data = cur_val;
 		
 		// set: width | watch type (write only) | # register enable
 		dr7 |= (width_bits << (18 + (4 * i))) | (0b01 << (16 + (4 * i))) | (0b1 << (2 * i));
@@ -2010,7 +2023,8 @@ void continue_to_next(DebugState *dbg, int pid) {
 				panic("do some masking here, I guess?\n");
 			}
 
-			printf("[0x%llx] Variable %s changed to %lu\n", regs.rip, var->name, new_val);
+			printf("[0x%llx] Variable %s changed from %lu to %lu\n", regs.rip, var->name, wp->old_data, new_val);
+			wp->old_data = new_val;
 
 trigger_end:
 			triggerbits = triggerbits >> 1;
@@ -2029,7 +2043,6 @@ trigger_end:
 
 	// There should only ever be 1 breakpoint per address
 	// (prevents replacing good orig_data with a trap unintentionally)
-	
 	Breakpoint *break_check = NULL;
 	uint64_t i = 0;
 	for (; i < dbg->break_len; i++) {
@@ -2054,7 +2067,7 @@ trigger_end:
 	}
 
 	// Garbage collect breakpoints if they exist. This *shouldn't* cause watch/break indexing issues, 
-	// because the watchpoints referring to the now bad breakpoint idx should already be gone
+	// because the watchpoints referring to the now bad breakpoint idx *should* already be gone
 	if (!dbg->break_len) {
 		return;
 	}
@@ -2106,7 +2119,6 @@ int main(int argc, char **argv) {
 
 	print_block_table(dbg.block_table, dbg.block_len);
 
-	// Set trap on main end so we don't have to wait through libc pre and postamble
 	FuncFrame main_frame = {0};
 	if (find_function_frame_approx(&dbg, "main", &main_frame)) {
 		Breakpoint *br = &dbg.break_table[dbg.break_len++];
