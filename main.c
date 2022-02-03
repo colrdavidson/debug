@@ -1914,8 +1914,6 @@ trigger_end:
 	regs.rip -= 1;
 	ptrace(PTRACE_SETREGS, pid, NULL, &regs);
 
-	uint64_t new_inst = ptrace(PTRACE_PEEKDATA, pid, (void *)regs.rip, NULL);
-
 	if (break_check->ref_count > 0) {
 		dbg->reset_idx = i;
 		dbg->should_reset = true;
@@ -1986,7 +1984,7 @@ void add_watchpoint(DebugState *dbg, int pid, char *var_name) {
 			}
 		}
 		if (var_block == NULL) {
-			printf("Unable to find variable in scope!\n");
+			printf("Unable to find variable %s in scope!\n", var_name);
 			return;
 		}
 	}
