@@ -510,7 +510,6 @@ int64_t get_leb128_i(uint8_t *buf, uint32_t *size) {
 		shift += 7;
 	} while (byte >= 128);
 
-	// Fuss with negative number sign extension
 	if (shift < 64 && (byte & 0x40)) {
 		result |= (~0) << shift;
 	}
@@ -899,7 +898,6 @@ void load_elf_sections(DWSections *sections, char *file_path) {
 	}
 	close(fd);
 
-	// Ensure that the file is an executable program
 	Elf64_Ehdr *elf_hdr = (Elf64_Ehdr *)sections->file_buffer;
 	if (!(elf_hdr->e_ident[0] == 0x7f &&
 		  elf_hdr->e_ident[1] == 'E'  &&
@@ -1562,7 +1560,7 @@ CurrentScopes *get_scopes(DebugState *dbg, uint64_t addr, CurrentScopes *sp) {
 	uint64_t scope_idx = blk_idx;
 	uint64_t framed_scope_idx = 0;
 
-	// Find parent scope with frame_base_expr
+	// Find nearest parent scope with frame_base_expr
 	Block *framed_scope = NULL;
 	if (scope_block->frame_base_expr) {
 		framed_scope = scope_block;
@@ -1620,7 +1618,7 @@ void eval_expr(struct user_regs_struct *regs, DWExprMachine *em, DWExpression in
 	}
 }
 
-// Intel Vol. 3B 17-5 - PG 3433-3434
+// Intel Vol. 3B 17-5 - PG 3433-3434 -- covers debug register operation
 void update_hw_breaks(DebugState *dbg, int pid, Block *framed_scope) {
 
 	struct user_regs_struct regs;
@@ -1638,7 +1636,7 @@ void update_hw_breaks(DebugState *dbg, int pid, Block *framed_scope) {
 		Watchpoint *wp = &dbg->watch_table[i];
 		Block *var = &dbg->block_table[wp->var_idx];
 
-		// Start evaluating variable location expression using framed scope as reference
+		// Get variable address
 		DWExprMachine em = {0};
 		em.frame_holder = framed_scope;
 		DWExpression ex = { .expr = var->loc_expr, .len = var->loc_expr_len };
@@ -1646,7 +1644,6 @@ void update_hw_breaks(DebugState *dbg, int pid, Block *framed_scope) {
 
 		uint64_t var_addr = em.val_stack[0];
 
-		// Determine variable address alignment to figure out how to place variable
 		int is_8b_aligned = (var_addr & 0x7) == 0;
 		int is_4b_aligned = (var_addr & 0x3) == 0;
 		int is_2b_aligned = (var_addr & 0x1) == 0;
@@ -1732,12 +1729,10 @@ void reset_breakpoint(DebugState *dbg, int pid) {
 }
 
 void cleanup_watchpoints(DebugState *dbg, int pid, uint64_t break_addr) {
-	// Nothing to clean up
 	if (!dbg->watch_len) {
 		return;
 	}
 
-	// Find the breakpoint attached to this address
 	uint64_t break_idx = (uint64_t)~0;
 	for (uint64_t i = 0; i < dbg->break_len; i++) {
 		Breakpoint *br = &dbg->break_table[i];
@@ -1746,12 +1741,11 @@ void cleanup_watchpoints(DebugState *dbg, int pid, uint64_t break_addr) {
 			break;
 		}
 	}
-	// Address didn't have any breakpoints
 	if (break_idx == (uint64_t)~0) {
 		return;
 	}
 
-	// Get all watchpoints associated with breakpoint, clean up, and remove breakpoint if ref <= 0
+	// Get all watchpoints associated with breakpoint, clean up, and remove breakpoint if ref_count <= 0
 	Breakpoint *br = &dbg->break_table[break_idx];
 	for (uint64_t j = dbg->watch_len - 1; j > 0; j--) {
 		Watchpoint *wp = &dbg->watch_table[j];
@@ -1981,14 +1975,13 @@ void continue_to_next(DebugState *dbg, int pid) {
 			Watchpoint *wp = &dbg->watch_table[br->idx];
 			Block *var = &dbg->block_table[wp->var_idx];
 
-			// Start evaluating variable location expression using framed scope as reference
+			// Find variable address
 			DWExprMachine em = {0};
 			em.frame_holder = &dbg->block_table[scopes.framed_scope_idx];
 			DWExpression ex = { .expr = var->loc_expr, .len = var->loc_expr_len };
 			eval_expr(&regs, &em, ex, 0);
 			uint64_t var_addr = em.val_stack[0];
 
-			// Determine variable address alignment to figure out how to place variable
 			int is_8b_aligned = (var_addr & 0x7) == 0;
 			int is_4b_aligned = (var_addr & 0x3) == 0;
 			int is_2b_aligned = (var_addr & 0x1) == 0;
@@ -2081,7 +2074,6 @@ trigger_end:
 	for (uint64_t i = 0; i < dbg->break_len; i++) {
 		Breakpoint *br = &dbg->break_table[i];
 		if (br->address == prev_address && br->ref_count > 0) {
-			// Adjust reset_idx after GC
 			dbg->reset_idx = i;
 			break;
 		}
@@ -2096,7 +2088,6 @@ int main(int argc, char **argv) {
 	DebugState dbg;
 	init_debug_state(&dbg, argv[1]);
 
-	// Attempt to debug program
 	int pid = fork();
 	if (pid == 0) {
 		ptrace(PTRACE_TRACEME, 0, NULL, NULL);
@@ -2115,10 +2106,9 @@ int main(int argc, char **argv) {
 
 	print_block_table(dbg.block_table, dbg.block_len);
 
+	// Set trap on main end so we don't have to wait through libc pre and postamble
 	FuncFrame main_frame = {0};
 	if (find_function_frame_approx(&dbg, "main", &main_frame)) {
-
-		// Set trap on main end so we don't have to wait through libc pre and postamble
 		Breakpoint *br = &dbg.break_table[dbg.break_len++];
 		add_breakpoint(pid, br, main_frame.start);
 	}
