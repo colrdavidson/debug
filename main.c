@@ -1430,12 +1430,15 @@ void build_line_tables(DWSections *sections, CULineTable **ext_line_table, uint6
 }
 
 void init_debug_state(DebugState *dbg, char *bin_name) {
+	memset(&dbg->sections, 0, sizeof(dbg->sections));
 	load_elf_sections(&dbg->sections, bin_name);
+
 
 	dbg->block_max = BLOCK_MAX;
 	dbg->block_table = (Block *)calloc(sizeof(Block), dbg->block_max);
 	dbg->block_len = 0;
 	build_block_table(&dbg->sections, &dbg->block_table, &dbg->block_len, &dbg->block_max);
+
 
 	dbg->line_tables_max = LINE_TABLES_MAX;
 	dbg->line_tables = (CULineTable *)malloc(sizeof(CULineTable) * dbg->line_tables_max);
