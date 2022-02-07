@@ -1,1 +1,1 @@
-clang -O0 -g -static -o simple simple.c
+clang -O0 -g -o simple simple.c

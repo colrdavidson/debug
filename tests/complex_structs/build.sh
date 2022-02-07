@@ -1,1 +1,1 @@
-clang -O0 -g -static -o structs structs.c
+clang -O0 -g -o structs structs.c

@@ -1,1 +1,1 @@
-clang -O0 -g -static -o shadows shadows.c
+clang -O0 -g -o shadows shadows.c

@@ -21,6 +21,7 @@
  */
 
 #define panic(...) do { dprintf(2, __VA_ARGS__); exit(1); } while (0)
+#define assert(x, ...) do { if ((x)) { dprintf(2, __VA_ARGS__); exit(1); } } while (0)
 #define happy_death(...) do { dprintf(2, __VA_ARGS__); exit(0); } while (0)
 
 // GLOBALS
@@ -33,6 +34,11 @@
 #define WATCHPOINTS_MAX 1024
 #define BLOCK_MAX 1024
 #define ABBREV_MAX 1024
+
+#define DT_NULL 0
+#define DT_NEEDED 1
+#define DT_STRTAB 5
+#define DT_SYMTAB 6
 
 enum {
 	SHT_NULL = 0,
@@ -80,6 +86,11 @@ typedef struct {
 	uint64_t sh_addralign;
 	uint64_t sh_entsize;
 } ELF64_Shdr;
+
+typedef struct {
+	uint64_t tag;
+	uint64_t val;
+} ELF64_Dyn;
 
 typedef struct {
 	uint32_t unit_length;
@@ -201,7 +212,8 @@ typedef struct {
 typedef struct {
 	char *var_name;
 
-	uint64_t old_data;
+	uint8_t *old_data;
+	uint8_t *new_data;
 	uint64_t watch_width;
 	uint64_t end;
 
@@ -248,15 +260,26 @@ typedef struct {
 
 typedef struct {
 	uint8_t *file_buffer;
+	uint64_t file_size;
+
 	char *bin_name;
 	char cur_dir[PATH_MAX + 1];
 
+	uint8_t *strtab;
+	int strtab_size;
+
+	uint8_t *dynamic;
+	int dynamic_size;
+
 	uint8_t *debug_info;
 	int debug_info_size;
+
 	uint8_t *debug_line;
 	int debug_line_size;
+
 	uint8_t *debug_str;
 	int debug_str_size;
+
 	uint8_t *debug_abbrev;
 	int debug_abbrev_size;
 } DWSections;
@@ -892,6 +915,7 @@ void load_elf_sections(DWSections *sections, char *file_path) {
 
 	uint64_t size = (uint64_t)f_end;
 	sections->file_buffer = malloc(size);
+	sections->file_size = size;
 
 	ssize_t ret = read(fd, sections->file_buffer, size);
 	if (ret < 0 || (uint64_t)ret != size) {
@@ -918,6 +942,12 @@ void load_elf_sections(DWSections *sections, char *file_path) {
 
 	#define ET_EXEC  2
 	#define ET_DYN   3
+	#define ET_CORE  4
+
+	if (elf_hdr->e_type == ET_CORE) {
+		panic("This debugger doesn't support core dumps yet!\n");
+	}
+
 	if (!(elf_hdr->e_type == ET_EXEC || elf_hdr->e_type == ET_DYN)) {
 		panic("This debugger only supports executable files\n");
 	}
@@ -942,24 +972,45 @@ void load_elf_sections(DWSections *sections, char *file_path) {
 		char dbgabbrev_str[] = ".debug_abbrev";
 		char dbgstr_str[] = ".debug_str";
 		char dbgline_str[] = ".debug_line";
+		char dynamic_str[] = ".dynamic";
+		char strtab_str[] = ".strtab";
 
-		if (!(strncmp(section_name, dbginfo_str, sizeof(dbginfo_str)))) {
+		if (!(memcmp(section_name, dbginfo_str, sizeof(dbginfo_str)))) {
 			sections->debug_info_size = sect_hdr->sh_size;
 			sections->debug_info = sections->file_buffer + sect_hdr->sh_offset;
-		} else if (!(strncmp(section_name, dbgabbrev_str, sizeof(dbgabbrev_str)))) {
+		} else if (!(memcmp(section_name, dbgabbrev_str, sizeof(dbgabbrev_str)))) {
 			sections->debug_abbrev_size = sect_hdr->sh_size;
 			sections->debug_abbrev = sections->file_buffer + sect_hdr->sh_offset;
-		} else if (!(strncmp(section_name, dbgstr_str, sizeof(dbgstr_str)))) {
+		} else if (!(memcmp(section_name, dbgstr_str, sizeof(dbgstr_str)))) {
 			sections->debug_str_size = sect_hdr->sh_size;
 			sections->debug_str = sections->file_buffer + sect_hdr->sh_offset;
-		} else if (!(strncmp(section_name, dbgline_str, sizeof(dbgline_str)))) {
+		} else if (!(memcmp(section_name, dbgline_str, sizeof(dbgline_str)))) {
 			sections->debug_line_size = sect_hdr->sh_size;
 			sections->debug_line = sections->file_buffer + sect_hdr->sh_offset;
+		} else if (!(memcmp(section_name, dynamic_str, sizeof(dynamic_str)))) {
+			sections->dynamic_size = sect_hdr->sh_size;
+			sections->dynamic = sections->file_buffer + sect_hdr->sh_offset;
+		} else if (!(memcmp(section_name, strtab_str, sizeof(strtab_str)))) {
+			sections->strtab_size = sect_hdr->sh_size;
+			sections->strtab = sections->file_buffer + sect_hdr->sh_offset;
 		}
 	}
 
 	if (!(sections->debug_info && sections->debug_abbrev && sections->debug_line)) {
 		panic("TODO Currently this debugger only supports binaries with debug symbols!\n");
+	}
+}
+
+void get_dynamic_libraries(DWSections *sections) {
+	if (!sections->dynamic) {
+		panic("TODO ELF does not contain a dynamic section!\n");
+	}
+
+	for (int i = 0; i < sections->dynamic_size; i += sizeof(ELF64_Dyn)) {
+		ELF64_Dyn *dyn_entry = (ELF64_Dyn *)(sections->dynamic + i);
+		if (dyn_entry->tag == DT_NEEDED) {
+			printf("NEEDED %s\n", sections->strtab + dyn_entry->val);
+		}
 	}
 }
 
@@ -1432,13 +1483,12 @@ void build_line_tables(DWSections *sections, CULineTable **ext_line_table, uint6
 void init_debug_state(DebugState *dbg, char *bin_name) {
 	memset(&dbg->sections, 0, sizeof(dbg->sections));
 	load_elf_sections(&dbg->sections, bin_name);
-
+	get_dynamic_libraries(&dbg->sections);
 
 	dbg->block_max = BLOCK_MAX;
 	dbg->block_table = (Block *)calloc(sizeof(Block), dbg->block_max);
 	dbg->block_len = 0;
 	build_block_table(&dbg->sections, &dbg->block_table, &dbg->block_len, &dbg->block_max);
-
 
 	dbg->line_tables_max = LINE_TABLES_MAX;
 	dbg->line_tables = (CULineTable *)malloc(sizeof(CULineTable) * dbg->line_tables_max);
@@ -1557,7 +1607,6 @@ CurrentScopes *get_scopes(DebugState *dbg, uint64_t addr, CurrentScopes *sp) {
 		}
 	}
 	if (scope_block == NULL) {
-		printf("Unable to find current scope!\n");
 		return NULL;
 	}
 
@@ -1628,17 +1677,39 @@ void update_hw_breaks(DebugState *dbg, int pid, Block *framed_scope) {
 	struct user_regs_struct regs;
 	ptrace(PTRACE_GETREGS, pid, NULL, &regs);
 
-	if (dbg->watch_len > 4) {
+	if (dbg->watch_len > HW_SLOTS_MAX) {
 		panic("TODO Can't handle software watchpoints yet!\n");
 	}
 
 	memset(&dbg->hw_slots, 0, sizeof(dbg->hw_slots));
 	int hw_slots_len = 0;
+	int hw_slots_used = 0;
+	int slot_off = 0;
 
 	uint64_t dr7 = 0b00000000000000010000000100000000;
 	for (uint64_t i = 0; i < dbg->watch_len; i++) {
 		Watchpoint *wp = &dbg->watch_table[i];
 		Block *var = &dbg->block_table[wp->var_idx];
+
+
+		char width_bits = 0;
+		int watchpoints_used = 5;
+		if (wp->watch_width == 8) { width_bits = 0b10; watchpoints_used = 1; }
+		else if (wp->watch_width == 4) { width_bits = 0b11; watchpoints_used = 1; }
+		else if (wp->watch_width == 2) { width_bits = 0b01; watchpoints_used = 1; }
+		else if (wp->watch_width == 1) { width_bits = 0b00; watchpoints_used = 1; }
+		else if (wp->watch_width > 8) {
+			width_bits = 0b10;
+
+			int rem = !!(wp->watch_width % 8);
+			watchpoints_used = (wp->watch_width / 8) + rem;
+		} else {
+			panic("unable to handle unaligned variables!\n");
+		}
+
+		if (hw_slots_used + watchpoints_used > HW_SLOTS_MAX) {
+			panic("TODO Needs software watchpoint support!\n");
+		}
 
 		// Get variable address
 		DWExprMachine em = {0};
@@ -1657,42 +1728,43 @@ void update_hw_breaks(DebugState *dbg, int pid, Block *framed_scope) {
 			panic("Unable to handle unaligned watchpoints!\n");
 		}
 
-		char width_bits = 0;
-		int watchpoints_used = 5;
-		if (wp->watch_width == 8) { width_bits = 0b10; watchpoints_used = 1; }
-		else if (wp->watch_width == 4) { width_bits = 0b11; watchpoints_used = 1; }
-		else if (wp->watch_width == 2) { width_bits = 0b01; watchpoints_used = 1; }
-		else if (wp->watch_width == 1) { width_bits = 0b00; watchpoints_used = 1; }
-		else if (wp->watch_width > 8 && (wp->watch_width % 8) == 0) {
-			width_bits = 0b10;
-			watchpoints_used = wp->watch_width / 8;
-		} else {
-			panic("unable to handle unaligned variables!\n");
-		}
-		if (watchpoints_used > 1) {
-			panic("unable to handle large watchpoints\n");
-		}
-
 		HWBreak *br = &dbg->hw_slots[hw_slots_len];
 		br->type = HWWatchpoint;
 		br->idx = i;
 		hw_slots_len++;
+		hw_slots_used += watchpoints_used;
 
-		uint64_t cur_val = ptrace(PTRACE_PEEKDATA, pid, (void *)var_addr, NULL);
-		if (wp->watch_width == 1) {
-			cur_val = (uint8_t)cur_val;
-		} else if (wp->watch_width == 2) {
-			cur_val = (uint16_t)cur_val;
-		} else if (wp->watch_width <= 4) {
-			cur_val = (uint32_t)cur_val;
-		} else if (wp->watch_width < 8) {
-			panic("do some masking here, I guess?\n");
+
+		memset(wp->old_data, 0, wp->watch_width);
+
+		uint64_t rem_width = wp->watch_width;
+		uint64_t leftovers;
+		for (int j = 0; j < watchpoints_used; j++) {
+			if (rem_width > 8) {
+				leftovers = 8;
+				rem_width -= 8;
+			} else {
+				leftovers = rem_width;
+				rem_width = 0;
+			}
+
+			uint64_t cur_val = ptrace(PTRACE_PEEKDATA, pid, (void *)(var_addr + (j * 8)), NULL);
+			memcpy(wp->old_data + (j * 8), &cur_val, leftovers);
+			
+			int width_off = 18 + (4 * slot_off);
+			int watchtype_off = 16 + (4 * slot_off);
+			int register_enable_off = 2 * slot_off;
+			int reg_idx = slot_off;
+
+			printf("[0x%llx] adding %s to watchlist\n", regs.rip, var->name);
+			printf("%u, %u, %u, %u, %u\n", width_off, watchtype_off, register_enable_off, reg_idx, width_bits);
+
+			// set: width | watch type (write only) | # register enable
+			dr7 |= (width_bits << width_off) | (0b01 << watchtype_off) | (0b1 << register_enable_off);
+			ptrace(PTRACE_POKEUSER, pid, (void *)offsetof(struct user, u_debugreg[reg_idx]), (void *)(var_addr + (j * 8)));
+
+			slot_off++;
 		}
-		wp->old_data = cur_val;
-		
-		// set: width | watch type (write only) | # register enable
-		dr7 |= (width_bits << (18 + (4 * i))) | (0b01 << (16 + (4 * i))) | (0b1 << (2 * i));
-		ptrace(PTRACE_POKEUSER, pid, (void *)offsetof(struct user, u_debugreg[i]), (void *)var_addr);
 	}
 
 	printf("Setting dr7 to 0x%lx -- %lu watchpoints\n", dr7, dbg->watch_len);
@@ -1761,7 +1833,7 @@ void cleanup_watchpoints(DebugState *dbg, int pid, uint64_t break_addr) {
 		return;
 	}
 
-	// Get all watchpoints associated with breakpoint, clean up, and remove breakpoint if ref_count <= 0
+	// Get all watchpoints associated with breakpoint, clean up
 	Breakpoint *br = &dbg->break_table[break_idx];
 	for (uint64_t j = dbg->watch_len - 1; j > 0; j--) {
 		Watchpoint *wp = &dbg->watch_table[j];
@@ -1769,8 +1841,10 @@ void cleanup_watchpoints(DebugState *dbg, int pid, uint64_t break_addr) {
 			Watchpoint *end = &dbg->watch_table[dbg->watch_len];
 			Watchpoint *old = &dbg->watch_table[j];
 
-			memcpy(old, end, sizeof(Breakpoint));
-			memset(end, 0, sizeof(Breakpoint));
+			free(old->old_data);
+			free(old->new_data);
+			memcpy(old, end, sizeof(Watchpoint));
+			memset(end, 0, sizeof(Watchpoint));
 			dbg->watch_len--;
 
 			br->ref_count -= 1;
@@ -1898,6 +1972,7 @@ void add_watchpoint(DebugState *dbg, int pid, char *var_name) {
 			}
 
 			Breakpoint *br = &dbg->break_table[dbg->break_len];
+			printf("Breakpoint added @ 0x%lx\n", wp->end);
 			add_breakpoint(pid, br, wp->end);
 			dbg->break_len++;
 		}
@@ -1916,7 +1991,6 @@ void add_watchpoint(DebugState *dbg, int pid, char *var_name) {
 			tmp_block = &dbg->block_table[tmp_block->type_idx];
 		}
 
-/*
 		for (uint64_t i = type_chain_len - 1; i >= 0; i--) {
 			Block *type = &dbg->block_table[type_chain[i]];
 			if (type->type == DW_TAG_structure_type) {
@@ -1928,9 +2002,10 @@ void add_watchpoint(DebugState *dbg, int pid, char *var_name) {
 			if (i == 0) break;
 		}
 		printf("%s;\n", var_block->name);
-*/
 
 		wp->watch_width = dbg->block_table[type_chain[type_chain_len - 1]].type_width;
+		wp->old_data = (uint8_t *)calloc(wp->watch_width, sizeof(uint8_t));
+		wp->new_data = (uint8_t *)calloc(wp->watch_width, sizeof(uint8_t));
 
 		dbg->watch_len++;
 		var_watch = wp;
@@ -1956,14 +2031,15 @@ void continue_to_next(DebugState *dbg, int pid) {
 		happy_death("Program died with return code %d, bye!\n", ret_val);
 	}
 
-	uint64_t dr6 = 0;
-	dr6 = ptrace(PTRACE_PEEKUSER, pid, (void *)offsetof(struct user, u_debugreg[6]), NULL);
+	uint64_t dr6 = ptrace(PTRACE_PEEKUSER, pid, (void *)offsetof(struct user, u_debugreg[6]), NULL);
 
 	uint32_t triggerbits = dr6 & 0b1111;
 /*
 	int dr7_set        = (dr6 >> 12) & 1;
 	int single_stepped = (dr6 >> 14) & 1;
 */
+
+	printf("TRIGGER: %u | 0x%lx\n", triggerbits, dr6);
 
 	if (ptrace(PTRACE_POKEUSER, pid, (void *)offsetof(struct user, u_debugreg[6]), NULL)) {
 		panic("failed to set up dr6!\n");
@@ -1974,22 +2050,36 @@ void continue_to_next(DebugState *dbg, int pid) {
 
 		CurrentScopes scopes = {0};
 		if (!get_scopes(dbg, regs.rip, &scopes)) {
-			printf("Failed to find scope!\n");
 			return;
 		}
 
-		for (uint64_t i = 0; i < dbg->hw_slots_max && triggerbits; i++) {
-			if (!(triggerbits & 0b1)) {
-				goto trigger_end;
-			}
-
+		for (uint64_t i = 0; i < dbg->hw_slots_max; i++) {
 			HWBreak *br = &dbg->hw_slots[i];
 			if (br->type != HWWatchpoint) {
-				goto trigger_end;
+				triggerbits = triggerbits >> 1;
+				continue;
 			}
 
 			Watchpoint *wp = &dbg->watch_table[br->idx];
 			Block *var = &dbg->block_table[wp->var_idx];
+
+			int watchpoints_used = 5;
+			if (wp->watch_width <= 8) {
+				watchpoints_used = 1; 
+			} else if (wp->watch_width > 8) {
+				int rem = !!(wp->watch_width % 8);
+				watchpoints_used = (wp->watch_width / 8) + rem;
+			}
+			assert(watchpoints_used > 4, "unable to handle large watchpoints\n");
+
+			uint8_t bitmasks[HW_SLOTS_MAX] = { 0b0001, 0b0011, 0b0111, 0b1111 };
+			printf("triggerbits: %u; bits: %u; watchpoints: %u\n", triggerbits, triggerbits & bitmasks[watchpoints_used - 1], watchpoints_used);
+			if (!(triggerbits & bitmasks[watchpoints_used - 1])) {
+				printf("Skipping thing here!\n");
+				triggerbits = triggerbits >> watchpoints_used;
+				continue;
+			}
+			triggerbits = triggerbits >> watchpoints_used;
 
 			// Find variable address
 			DWExprMachine em = {0};
@@ -2007,30 +2097,32 @@ void continue_to_next(DebugState *dbg, int pid) {
 				panic("Unable to handle unaligned watchpoints!\n");
 			}
 
-			int watchpoints_used = 5;
+			memset(wp->new_data, 0, wp->watch_width);
+			uint64_t rem_width = wp->watch_width;
+			uint64_t leftovers;
+			for (int j = 0; j < watchpoints_used; j++) {
+				if (rem_width > 8) {
+					leftovers = 8;
+					rem_width -= 8;
+				} else {
+					leftovers = rem_width;
+					rem_width = 0;
+				}
+
+				uint64_t cur_val = ptrace(PTRACE_PEEKDATA, pid, (void *)(var_addr + (j * 8)), NULL);
+				memcpy(wp->new_data + (j * 8), &cur_val, leftovers);
+			}
+
 			if (wp->watch_width <= 8) {
-				watchpoints_used = 1; 
+				uint64_t old_data = 0;
+				uint64_t new_data = 0;
+				memcpy(&old_data, wp->old_data, wp->watch_width);
+				memcpy(&new_data, wp->new_data, wp->watch_width);
+				printf("[0x%llx] Variable %s changed from %lx to %lx | %lu\n", regs.rip, var->name, old_data, new_data, wp->watch_width);
+			} else {
+				printf("[0x%llx] Variable %s changed from %u to %u | %lu\n", regs.rip, var->name, wp->old_data[0], wp->new_data[0], wp->watch_width);
 			}
-			if (watchpoints_used > 1) {
-				panic("unable to handle large watchpoints\n");
-			}
-
-			uint64_t new_val = ptrace(PTRACE_PEEKDATA, pid, (void *)var_addr, NULL);
-			if (wp->watch_width == 1) {
-				new_val = (uint8_t)new_val;
-			} else if (wp->watch_width == 2) {
-				new_val = (uint16_t)new_val;
-			} else if (wp->watch_width <= 4) {
-				new_val = (uint32_t)new_val;
-			} else if (wp->watch_width < 8) {
-				panic("do some masking here, I guess?\n");
-			}
-
-			printf("[0x%llx] Variable %s changed from %lu to %lu\n", regs.rip, var->name, wp->old_data, new_val);
-			wp->old_data = new_val;
-
-trigger_end:
-			triggerbits = triggerbits >> 1;
+			memcpy(wp->old_data, wp->new_data, wp->watch_width);
 		}
 	}
 

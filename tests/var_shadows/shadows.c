@@ -1,5 +1,5 @@
 int main() {
-	int foo = 2;
+	int foo = 502;
 	int bar = 3;
 
 	{

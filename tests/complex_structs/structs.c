@@ -1,8 +1,8 @@
 typedef struct {
 	int apple;
-	char carrot;
+	int carrot;
 	int banana;
-	short beet;
+	int beet;
 } Foobar;
 
 struct BigStruct {
@@ -17,9 +17,11 @@ struct BigStruct {
 };
 
 int main() {
-	struct BigStruct bs = {0};
+//	struct BigStruct bs = {0};
 
 	Foobar foo = {0};
+	foo.beet = 8;
+/*
 	foo.apple = 2;
 	foo.banana = 5;
 	foo.beet = 9;
@@ -29,6 +31,8 @@ int main() {
 	foo.apple += foo.banana;
 	foo.banana += foo.apple;
 	bs.f3 -= foo.carrot;
+*/
 
-	return foo.apple + foo.banana + foo.beet + foo.carrot + bs.f3 + bs.f8;
+	return foo.beet;
+//	return foo.apple + foo.banana + foo.beet + foo.carrot + bs.f3 + bs.f8;
 }
