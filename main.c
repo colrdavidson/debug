@@ -1921,7 +1921,7 @@ VarInfo get_var_for_name(DebugState *dbg, CurrentScopes *scopes, char *var_name)
 	Block *var_block = NULL;
 	for (; blk_idx < dbg->block_len; blk_idx++) {
 		Block *blk = &dbg->block_table[blk_idx];
-		if (blk->name && strcmp(blk->name, _var_name) == 0 && blk->type == DW_TAG_variable) {
+		if (blk->name && strcmp(blk->name, _var_name) == 0 && (blk->type == DW_TAG_variable || blk->type == DW_TAG_formal_parameter)) {
 			var_block = blk;
 			break;
 		}
@@ -2454,7 +2454,7 @@ int main(int argc, char **argv) {
 			}
 
 			VarInfo info = get_var_for_name(&dbg, &scopes, var_name);
-			if (!info.var_idx) {
+			if (info.var_idx == (uint64_t)~0) {
 				printf("Failed to find variable %s\n", var_name);
 				continue;
 			}
