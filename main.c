@@ -33,6 +33,7 @@
 #define VAL_STACK_MAX 32
 #define BREAKPOINTS_MAX 1024
 #define WATCHPOINTS_MAX 1024
+#define LINE_BUFFER_MAX 1024
 #define BLOCK_MAX 1024
 #define ABBREV_MAX 1024
 
@@ -1992,6 +1993,7 @@ VarInfo get_var_for_name(DebugState *dbg, CurrentScopes *scopes, char *var_name)
  * get member offset, add to running offset tally
  *
  */
+
 	Block *struct_block = var_block;
 	uint64_t struct_idx = 0;
 	for (;;) {
@@ -2137,15 +2139,19 @@ void add_watchpoint(DebugState *dbg, int pid, char *var_name) {
 	update_hw_breaks(dbg, pid, framed_scope);
 }
 
-void continue_to_next(DebugState *dbg, int pid) {
+void continue_to_next(DebugState *dbg, int pid, bool single_step) {
 	struct user_regs_struct regs;
 
-
 	if (dbg->should_reset) {
+		printf("Resetting breakpoint?\n");
 		reset_breakpoint(dbg, pid);
 	}
 
-	ptrace(PTRACE_CONT, pid, NULL, NULL);
+	if (single_step) {
+		ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
+	} else {
+		ptrace(PTRACE_CONT, pid, NULL, NULL);
+	}
 
 	int status;
 	waitpid(pid, &status, 0);
@@ -2162,15 +2168,21 @@ void continue_to_next(DebugState *dbg, int pid) {
 	int single_stepped = (dr6 >> 14) & 1;
 */
 
-	printf("TRIGGER: %u | 0x%lx\n", triggerbits, dr6);
 
 	if (ptrace(PTRACE_POKEUSER, pid, (void *)offsetof(struct user, u_debugreg[6]), NULL)) {
 		panic("failed to set up dr6!\n");
 	}
 
 	ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-	if (triggerbits) {
+	LineMachine *lm = NULL;
+	get_approx_line_for_addr(dbg, regs.rip, &lm);
+	if (!lm) {
+		printf("Stopped @ 0x%llx\n", regs.rip);
+	} else {
+		printf("Stopped @ 0x%llx | line %u\n", regs.rip, lm->line_num);
+	}
 
+	if (triggerbits) {
 		CurrentScopes scopes = {0};
 		if (!get_scopes(dbg, regs.rip, &scopes)) {
 			return;
@@ -2315,6 +2327,29 @@ void continue_to_next(DebugState *dbg, int pid) {
 	}
 }
 
+void print_registers(int pid) {
+	struct user_regs_struct regs;
+	ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+
+	printf("RIP: %llx\n", regs.rip);
+	printf("RAX: %llx\n", regs.rax);
+	printf("RBX: %llx\n", regs.rbx);
+	printf("RCX: %llx\n", regs.rcx);
+	printf("RDX: %llx\n", regs.rdx);
+	printf("RDI: %llx\n", regs.rdi);
+	printf("RSI: %llx\n", regs.rsi);
+	printf("RSP: %llx\n", regs.rsp);
+	printf("RBP: %llx\n", regs.rbp);
+	printf("R8: %llx\n", regs.r8);
+	printf("R9: %llx\n", regs.r9);
+	printf("R10: %llx\n", regs.r10);
+	printf("R11: %llx\n", regs.r11);
+	printf("R12: %llx\n", regs.r12);
+	printf("R13: %llx\n", regs.r13);
+	printf("R14: %llx\n", regs.r14);
+	printf("R15: %llx\n", regs.r15);
+}
+
 int main(int argc, char **argv) {
 	if (argc < 2) {
 		panic("Please provide the debugger a program to debug!\n");
@@ -2341,17 +2376,124 @@ int main(int argc, char **argv) {
 
 	print_block_table(dbg.block_table, dbg.block_len);
 
+/*
 	FuncFrame main_frame = {0};
 	if (find_function_frame_approx(&dbg, "main", &main_frame)) {
 		Breakpoint *br = &dbg.break_table[dbg.break_len++];
 		add_breakpoint(pid, br, main_frame.start);
 	}
+*/
 
-	continue_to_next(&dbg, pid);
-	add_watchpoint(&dbg, pid, "stuckt.bar.banana");
-	add_watchpoint(&dbg, pid, "bar");
-
+	char line_buffer[LINE_BUFFER_MAX + 1];
 	for (;;) {
-		continue_to_next(&dbg, pid);
+		char prompt[] = "> ";
+		write(1, prompt, sizeof(prompt));
+		ssize_t line_size = read(STDIN_FILENO, line_buffer, LINE_BUFFER_MAX);
+		line_buffer[line_size - 1] = 0;
+
+		if (!strcmp(line_buffer, "c")) {
+			continue_to_next(&dbg, pid, false);
+		} else if (line_size > 3 && line_buffer[0] == 'w' && line_buffer[1] == ' ') {
+			char *watch_name = line_buffer + 2;
+			add_watchpoint(&dbg, pid, watch_name);
+		} else if (line_size > 3 && line_buffer[0] == 'b' && line_buffer[1] == ' ') {
+			char *break_str = line_buffer + 2;
+
+			char *break_end;
+			uint64_t break_addr = strtol(break_str, &break_end, 0);
+			if (break_str == break_end) {
+				printf("Invalid breakpoint address: %s\n", break_str);
+				continue;
+			}
+
+			Breakpoint *br = &dbg.break_table[dbg.break_len++];
+			add_breakpoint(pid, br, break_addr);
+			printf("Set breakpoint @ 0x%lx\n", break_addr);
+		} else if (line_size > 4 && line_buffer[0] == 'b' && line_buffer[1] == 'l' && line_buffer[2] == ' ') {
+			char *break_str = line_buffer + 3;
+
+			char *break_end;
+			uint64_t break_line_num = strtol(break_str, &break_end, 0);
+			if (break_str == break_end) {
+				printf("Invalid line break: %s\n", break_str);
+				continue;
+			}
+
+			uint64_t rem_size = strlen(break_end);
+			printf("%s | %lu\n", break_end, rem_size);
+			if (break_end[0] != ' ') {
+				printf("command requires a file name\n");
+				continue;
+			}
+
+			char *file_name = break_end + 1;
+
+			uint64_t break_addr = find_line_addr_in_file(&dbg, file_name, break_line_num);
+			if (break_addr == (uint64_t)~0) {
+				printf("Unable to find line %lu\n", break_line_num);
+				continue;
+			}
+
+			Breakpoint *br = &dbg.break_table[dbg.break_len++];
+			add_breakpoint(pid, br, break_addr);
+			printf("Set breakpoint @ 0x%lx\n", break_addr);
+		} else if (!strcmp(line_buffer, "s")) {
+			continue_to_next(&dbg, pid, true);
+		} else if (!strcmp(line_buffer, "p")) {
+			print_registers(pid);
+		} else if (line_size > 3 && line_buffer[0] == 'p' && line_buffer[1] == ' ') {
+			char *var_name = line_buffer + 2;
+
+			struct user_regs_struct regs;
+			ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+
+			CurrentScopes scopes = {0};
+			if (!get_scopes(&dbg, regs.rip, &scopes)) {
+				printf("Failed to find scope!\n");
+				continue;
+			}
+
+			VarInfo info = get_var_for_name(&dbg, &scopes, var_name);
+			if (!info.var_idx) {
+				printf("Failed to find variable %s\n", var_name);
+				continue;
+			}
+
+			Block *var = &dbg.block_table[info.var_idx];
+
+			// Get variable address
+			DWExprMachine em = {0};
+			em.frame_holder = &dbg.block_table[scopes.framed_scope_idx];
+			DWExpression ex = { .expr = var->loc_expr, .len = var->loc_expr_len };
+			eval_expr(&regs, &em, ex, 0);
+
+			uint64_t var_addr = em.val_stack[0];
+
+			if (info.member_idx) {
+				var_addr += info.member_offset;
+			}
+
+			uint64_t cur_val = ptrace(PTRACE_PEEKDATA, pid, (void *)var_addr, NULL);
+			if (info.width <= 8) {
+				uint64_t data = 0;
+				memcpy(&data, &cur_val, info.width);
+				printf("%s == %lu, width: %lu\n", var_name, cur_val, info.width);
+			} else {
+				printf("%s chunk: %lx\n", var_name, cur_val);
+			}
+		} else if (!strcmp(line_buffer, "q")) {
+			return 0;
+		} else if (!strcmp(line_buffer, "h")) {
+			printf("bl <line> <file> -- break at line in file\n");
+			printf("w <var> -- watch variable\n");
+			printf("p <var> -- print variable\n");
+			printf("p -- print registers\n");
+			printf("s -- single step\n");
+			printf("c -- continue\n");
+			printf("b -- break at address\n");
+			printf("q -- quit\n");
+		} else {
+			printf("Command %s not recognized\n", line_buffer);
+		}
 	}
 }
