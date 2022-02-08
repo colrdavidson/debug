@@ -1,8 +1,8 @@
 typedef struct {
 	int apple;
 	int carrot;
-	int banana;
 	int beet;
+	int banana;
 } Foobar;
 
 struct BigStruct {
@@ -16,13 +16,19 @@ struct BigStruct {
 	long long f8;
 };
 
+typedef struct {
+	Foobar bar;
+	int baloney;
+} Structification;
+
 int main() {
 //	struct BigStruct bs = {0};
 
-	Foobar foo = {0};
-	foo.beet = 8;
+	Structification stuckt = {0};
+	stuckt.bar.banana = 2;
+	stuckt.bar.beet = 8;
+	stuckt.bar.banana += stuckt.bar.beet;
 /*
-	foo.apple = 2;
 	foo.banana = 5;
 	foo.beet = 9;
 	foo.carrot = 5;
@@ -33,6 +39,6 @@ int main() {
 	bs.f3 -= foo.carrot;
 */
 
-	return foo.beet;
+	return stuckt.bar.beet + stuckt.bar.apple;
 //	return foo.apple + foo.banana + foo.beet + foo.carrot + bs.f3 + bs.f8;
 }

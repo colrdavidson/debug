@@ -29,6 +29,7 @@
 #define BLOCK_STACK_MAX 20
 #define LINE_TABLES_MAX 20
 #define TYPE_CHAIN_MAX 20
+#define MEMBERS_MAX 30
 #define VAL_STACK_MAX 32
 #define BREAKPOINTS_MAX 1024
 #define WATCHPOINTS_MAX 1024
@@ -214,6 +215,10 @@ typedef struct {
 
 	uint8_t *old_data;
 	uint8_t *new_data;
+
+	uint64_t member_idx;
+	uint64_t member_offset;
+
 	uint64_t watch_width;
 	uint64_t end;
 
@@ -257,6 +262,14 @@ typedef struct {
 	int size;
 	int skip;
 } DWResult;
+
+typedef struct {
+	uint64_t var_idx;
+	uint64_t width;
+
+	uint64_t member_idx;
+	uint64_t member_offset;
+} VarInfo;
 
 typedef struct {
 	uint8_t *file_buffer;
@@ -1691,7 +1704,6 @@ void update_hw_breaks(DebugState *dbg, int pid, Block *framed_scope) {
 		Watchpoint *wp = &dbg->watch_table[i];
 		Block *var = &dbg->block_table[wp->var_idx];
 
-
 		char width_bits = 0;
 		int watchpoints_used = 5;
 		if (wp->watch_width == 8) { width_bits = 0b10; watchpoints_used = 1; }
@@ -1719,6 +1731,10 @@ void update_hw_breaks(DebugState *dbg, int pid, Block *framed_scope) {
 
 		uint64_t var_addr = em.val_stack[0];
 
+		if (wp->member_idx) {
+			var_addr += wp->member_offset;
+		}
+
 		int is_8b_aligned = (var_addr & 0x7) == 0;
 		int is_4b_aligned = (var_addr & 0x3) == 0;
 		int is_2b_aligned = (var_addr & 0x1) == 0;
@@ -1733,7 +1749,6 @@ void update_hw_breaks(DebugState *dbg, int pid, Block *framed_scope) {
 		br->idx = i;
 		hw_slots_len++;
 		hw_slots_used += watchpoints_used;
-
 
 		memset(wp->old_data, 0, wp->watch_width);
 
@@ -1756,7 +1771,7 @@ void update_hw_breaks(DebugState *dbg, int pid, Block *framed_scope) {
 			int register_enable_off = 2 * slot_off;
 			int reg_idx = slot_off;
 
-			printf("[0x%llx] adding %s to watchlist\n", regs.rip, var->name);
+			printf("[0x%llx] adding %s with width %lu and offset %lx to watchlist\n", regs.rip, var->name, wp->watch_width, wp->member_offset);
 			printf("%u, %u, %u, %u, %u\n", width_off, watchtype_off, register_enable_off, reg_idx, width_bits);
 
 			// set: width | watch type (write only) | # register enable
@@ -1860,26 +1875,52 @@ void cleanup_watchpoints(DebugState *dbg, int pid, uint64_t break_addr) {
 	update_hw_breaks(dbg, pid, &dbg->block_table[scopes.framed_scope_idx]);
 }
 
-void add_watchpoint(DebugState *dbg, int pid, char *var_name) {
-	struct user_regs_struct regs;
-	ptrace(PTRACE_GETREGS, pid, NULL, &regs);
 
-	CurrentScopes scopes = {0};
-	if (!get_scopes(dbg, regs.rip, &scopes)) {
-		printf("Failed to find scope!\n");
-		return;
+VarInfo get_var_for_name(DebugState *dbg, CurrentScopes *scopes, char *var_name) {
+	uint64_t var_name_len = strlen(var_name);
+	char *_varstr = (char *)malloc(var_name_len + 1);
+	strcpy(_varstr, var_name);
+
+	char *members[MEMBERS_MAX] = {0};
+	uint64_t members_len = 0;
+
+	VarInfo info = {0};
+	info.var_idx = (uint64_t)~0;
+
+	char *ptr = _varstr;
+	char *head = ptr;
+	while (*ptr) {
+		if (*ptr == '.') {
+			*ptr = 0;
+
+			if (members_len + 1 > MEMBERS_MAX) {
+				panic("No more room for more members!\n");
+			}
+
+			members[members_len++] = head;
+			head = ptr + 1;
+		}
+
+		ptr++;
+	}
+	if (head != ptr) {
+		if (members_len + 1 > MEMBERS_MAX) {
+			panic("No more room for more members!\n");
+		}
+		members[members_len++] = head;
+	}
+	if (!members_len) {
+		goto find_var_end;
 	}
 
-	Block *framed_scope = &dbg->block_table[scopes.framed_scope_idx];
-	Block *scope_block = &dbg->block_table[scopes.scope_idx];
-
-	uint64_t blk_idx = scopes.scope_idx;
+	char *_var_name = members[0];
+	uint64_t blk_idx = scopes->scope_idx;
 
 	// Find variable in scope by descending tree from scope_block (can pass into other scopes)
 	Block *var_block = NULL;
 	for (; blk_idx < dbg->block_len; blk_idx++) {
 		Block *blk = &dbg->block_table[blk_idx];
-		if (blk->name && strcmp(blk->name, var_name) == 0) {
+		if (blk->name && strcmp(blk->name, _var_name) == 0 && blk->type == DW_TAG_variable) {
 			var_block = blk;
 			break;
 		}
@@ -1887,27 +1928,27 @@ void add_watchpoint(DebugState *dbg, int pid, char *var_name) {
 
 	// Try using the framed scope idx instead if we couldn't find it in the lexical scope
 	if (var_block == NULL) {
-		blk_idx = scopes.framed_scope_idx;
+		blk_idx = scopes->framed_scope_idx;
 		for (; blk_idx < dbg->block_len; blk_idx++) {
 			Block *blk = &dbg->block_table[blk_idx];
-			if (blk->name && strcmp(blk->name, var_name) == 0) {
+			if (blk->name && strcmp(blk->name, _var_name) == 0 && blk->type == DW_TAG_variable) {
 				var_block = blk;
 				break;
 			}
 		}
 		if (var_block == NULL) {
-			printf("Unable to find variable %s in scope!\n", var_name);
-			return;
+			printf("Unable to find variable %s in scope!\n", _var_name);
+			goto find_var_end;
 		}
 	}
 
 	uint64_t var_idx = blk_idx;
-
+		
 	// Walk parent_idx to confirm that variable obtained in last pass belongs to current scope
 	Block *tmp_var_block = var_block;
 	uint64_t tmp_var_block_idx = var_idx;
 	for (;;) {
-		if (scopes.scope_idx == tmp_var_block_idx || scopes.framed_scope_idx == tmp_var_block_idx) {
+		if (scopes->scope_idx == tmp_var_block_idx || scopes->framed_scope_idx == tmp_var_block_idx) {
 			break;
 		}
 
@@ -1926,12 +1967,117 @@ void add_watchpoint(DebugState *dbg, int pid, char *var_name) {
 
 		tmp_var_block = &dbg->block_table[tmp_var_block_idx];
 	}
+
+	info.var_idx = var_idx;
+
+	if (members_len == 1) {
+		// Resolve type for variable to get width
+		Block *tmp_block = var_block;
+		for (;;) {
+			if (!tmp_block->type_idx) {
+				break;
+			}
+
+			tmp_block = &dbg->block_table[tmp_block->type_idx];
+		}
+
+		info.width = tmp_block->type_width;
+		goto find_var_end;
+	}
+		
 	
+/*
+ * Resolve struct members
+ * find each member, confirm they live as part of the variables struct
+ * get member offset, add to running offset tally
+ *
+ */
+	Block *struct_block = var_block;
+	uint64_t struct_idx = 0;
+	for (;;) {
+		if (!struct_block->type_idx) {
+			break;
+		}
+
+		struct_idx = struct_block->type_idx;
+		struct_block = &dbg->block_table[struct_block->type_idx];
+	}
+
+	uint64_t var_offset = 0;
+	uint64_t var_width = 0;
+	uint64_t member_idx = 0;
+	for (uint64_t i = 1; i < members_len; i++) {
+		char *sub_name = members[i];
+
+		for (uint64_t j = struct_idx + 1; j < dbg->block_len; j++) {
+			Block *member_block = &dbg->block_table[j];	
+			if (!strcmp(member_block->name, sub_name)) {
+				member_idx = j;
+				break;
+			}
+
+			if (member_block->parent_idx != struct_idx) {
+				printf("Couldn't find member %s for struct!\n", sub_name);
+				goto find_var_end;
+			}
+		}
+		if (!member_idx) {
+			printf("Couldn't find member %s for struct!\n", sub_name);
+			goto find_var_end;
+		}
+
+		Block *member_block = &dbg->block_table[member_idx];
+
+		Block *substruct_block = member_block;
+		uint64_t substruct_idx = 0;
+		for (;;) {
+			if (!substruct_block->type_idx) {
+				break;
+			}
+
+			substruct_idx = substruct_block->type_idx;
+			substruct_block = &dbg->block_table[substruct_block->type_idx];
+		}
+
+		struct_block = substruct_block;
+		struct_idx = substruct_idx;
+		var_width = substruct_block->type_width;
+
+		var_offset += member_block->member_offset;
+	}
+
+	info.member_idx = member_idx;
+	info.member_offset = var_offset;
+	info.width = var_width;
+
+find_var_end:
+	free(_varstr);
+	return info;
+}
+
+void add_watchpoint(DebugState *dbg, int pid, char *var_name) {
+	struct user_regs_struct regs;
+	ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+
+	CurrentScopes scopes = {0};
+	if (!get_scopes(dbg, regs.rip, &scopes)) {
+		printf("Failed to find scope!\n");
+		return;
+	}
+
+	VarInfo info = get_var_for_name(dbg, &scopes, var_name);
+	if (info.var_idx == (uint64_t)~0) {
+		return;
+	}
+
+	Block *framed_scope = &dbg->block_table[scopes.framed_scope_idx];
+	Block *scope_block = &dbg->block_table[scopes.scope_idx];
+
 	Watchpoint *var_watch = NULL;
 	uint64_t watch_idx = 0;
 	for (uint64_t i = 0; i < dbg->watch_len; i++) {
 		Watchpoint *wp = &dbg->watch_table[i];
-		if (wp->var_idx == var_idx) {
+		if (wp->var_idx == info.var_idx) {
 			var_watch = wp;
 			watch_idx = i;
 			break;
@@ -1953,7 +2099,9 @@ void add_watchpoint(DebugState *dbg, int pid, char *var_name) {
 
 		Watchpoint *wp = &dbg->watch_table[dbg->watch_len];
 		wp->end = end;
-		wp->var_idx = var_idx;
+		wp->var_idx = info.var_idx;
+		wp->member_idx = info.member_idx;
+		wp->member_offset = info.member_offset;
 		watch_idx = dbg->watch_len;
 
 		// establish a breakpoint so we can clean up the watchpoint when it drops out of scope
@@ -1977,33 +2125,8 @@ void add_watchpoint(DebugState *dbg, int pid, char *var_name) {
 			dbg->break_len++;
 		}
 		
-		// Build out list of all type data for variable
-		uint64_t type_chain[TYPE_CHAIN_MAX] = {0};
-		uint64_t type_chain_len = 0;
 
-		Block *tmp_block = var_block;
-		for (;;) {
-			if (!tmp_block->type_idx) {
-				break;
-			}
-
-			type_chain[type_chain_len++] = tmp_block->type_idx;
-			tmp_block = &dbg->block_table[tmp_block->type_idx];
-		}
-
-		for (uint64_t i = type_chain_len - 1; i >= 0; i--) {
-			Block *type = &dbg->block_table[type_chain[i]];
-			if (type->type == DW_TAG_structure_type) {
-				printf("struct ");
-			} else {
-				printf("%s ", type->name);
-			}
-
-			if (i == 0) break;
-		}
-		printf("%s;\n", var_block->name);
-
-		wp->watch_width = dbg->block_table[type_chain[type_chain_len - 1]].type_width;
+		wp->watch_width = info.width;
 		wp->old_data = (uint8_t *)calloc(wp->watch_width, sizeof(uint8_t));
 		wp->new_data = (uint8_t *)calloc(wp->watch_width, sizeof(uint8_t));
 
@@ -2088,11 +2211,15 @@ void continue_to_next(DebugState *dbg, int pid) {
 			eval_expr(&regs, &em, ex, 0);
 			uint64_t var_addr = em.val_stack[0];
 
+			if (wp->member_idx) {
+				var_addr += wp->member_offset;
+			}
+
 			int is_8b_aligned = (var_addr & 0x7) == 0;
 			int is_4b_aligned = (var_addr & 0x3) == 0;
 			int is_2b_aligned = (var_addr & 0x1) == 0;
 
-			//printf("8 %d, 4 %d, 2 %d\n", is_8b_aligned, is_4b_aligned, is_2b_aligned);
+			// printf("8 %d, 4 %d, 2 %d\n", is_8b_aligned, is_4b_aligned, is_2b_aligned);
 			if (!(is_8b_aligned || is_4b_aligned || is_2b_aligned || wp->watch_width == 1)) {
 				panic("Unable to handle unaligned watchpoints!\n");
 			}
@@ -2118,7 +2245,7 @@ void continue_to_next(DebugState *dbg, int pid) {
 				uint64_t new_data = 0;
 				memcpy(&old_data, wp->old_data, wp->watch_width);
 				memcpy(&new_data, wp->new_data, wp->watch_width);
-				printf("[0x%llx] Variable %s changed from %lx to %lx | %lu\n", regs.rip, var->name, old_data, new_data, wp->watch_width);
+				printf("[0x%llx] Variable %s changed from %lu to %lu | %lu\n", regs.rip, var->name, old_data, new_data, wp->watch_width);
 			} else {
 				printf("[0x%llx] Variable %s changed from %u to %u | %lu\n", regs.rip, var->name, wp->old_data[0], wp->new_data[0], wp->watch_width);
 			}
@@ -2221,7 +2348,7 @@ int main(int argc, char **argv) {
 	}
 
 	continue_to_next(&dbg, pid);
-	add_watchpoint(&dbg, pid, "foo");
+	add_watchpoint(&dbg, pid, "stuckt.bar.banana");
 	add_watchpoint(&dbg, pid, "bar");
 
 	for (;;) {
