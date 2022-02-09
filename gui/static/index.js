@@ -134,7 +134,7 @@ async function get_current_position() {
 	let new_position = await response.json();
 
 	render_position(new_position);
-	if (current_position.line != "") {
+	if (current_position.line != "" && current_position.line != new_position.line) {
 		let old_line_elem = document.getElementById('code-line-' + current_position.line);
 		old_line_elem.classList.remove("line-active");
 	}
