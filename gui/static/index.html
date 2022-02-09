@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<link rel="stylesheet" href="style.css">
+		<link rel="preconnect" href="https://fonts.googleapis.com">
+		<link rel="preconnect" href="https://fonts.gstatic.com">
+		<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fira+Code&family=Fira+Sans&display=swap">
+		<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
+
+		<script src="index.js"></script>
+	</head>
+	<body onload="main()">
+		<nav class="navbar">
+			<h2>Debug</h2>
+		</nav>
+		<div class="content">
+			<section>
+				<h3>File Tree</h3>
+			</section>
+			<section>
+				<i class="fa fa-file" aria-hidden="true"></i>
+				<i class="fa fa-play" aria-hidden="true"></i>
+				<i class="fa fa-step-forward" aria-hidden="true"></i>
+				<i class="fa fa-repeat" aria-hidden="true"></i>
+			</section>
+			<section id="file-display"></section>
+			<section>
+				<h3>Watchpoints</h3>
+				<input placeholder="enter watchpoint here..." />
+				<p><b>Foo: </b>0</p>
+				<p><b>Bar: </b>501</p>
+			</section>
+			<section>
+				<h3>Registers</h3>
+				<p><b>RIP: </b>0</p>
+				<p><b>RAX: </b>0x4fcee</p>
+				<p><b>RBX: </b>0</p>
+				<p><b>RCX: </b>0</p>
+				<p><b>RDX: </b>0</p>
+				<p><b>RDI: </b>0</p>
+				<p><b>RSI: </b>0</p>
+				<p><b>RSP: </b>0</p>
+				<p><b>RBP: </b>0</p>
+				<p><b>R8 : </b>0</p>
+				<p><b>R9 : </b>0x7ffee10101f44</p>
+				<p><b>R10: </b>2</p>
+				<p><b>R11: </b>5</p>
+				<p><b>R12: </b>0</p>
+				<p><b>R13: </b>0</p>
+				<p><b>R14: </b>0</p>
+				<p><b>R15: </b>0</p>
+			</section>
+			<section>
+				<h3>Memory</h3>
+				<p><b>0x7ffee10101f44: </b>0x40 0x50 0x10 0x12 0x13 0x40 0x50 0x10 0x12 0x13</p>
+				<p><b>0x7ffee10101f48: </b>0x40 0x50 0x10 0x12 0x13 0x40 0x50 0x10 0x12 0x13</p>
+				<p><b>0x7ffee10101f4B: </b>0x40 0x50 0x10 0x12 0x13 0x40 0x50 0x10 0x12 0x13</p>
+				<p><b>0x7ffee10101f4f: </b>0x40 0x50 0x10 0x12 0x13 0x40 0x50 0x10 0x12 0x13</p>
+			</section>
+		</div>
+	</body>
+</html>

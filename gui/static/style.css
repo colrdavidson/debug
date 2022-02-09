@@ -1,0 +1,126 @@
+:root {
+	--line-count-width: 1ch;
+}
+
+body {
+	margin: 0;
+}
+
+p, h1, h2, h3, h4, h5, pre {
+	margin: 0;
+	padding: 0;
+}
+
+p {
+	padding-bottom: 0.125rem;
+	font-size: 1rem;
+}
+h1, h2, h3, h4, h5 {
+	padding-bottom: 0.5rem;
+	font-family: 'Fira Sans', sans-serif;
+}
+
+code {
+	font-family: 'Fira Code', monospace;
+}
+
+nav {
+	display: flex;
+	flex-direction: row;
+	align-items: center;
+
+	background-color: #18bc9c;
+	color: white;
+	height: 2.5em;
+	padding-left: 1em;
+	padding-right: 1em;
+}
+
+nav > h2 {
+	padding: 0;
+}
+
+.content {
+	display: grid;
+	grid-template-columns: 4em 1fr 15em;
+	grid-template-rows: 2.5em 1fr 1fr 1fr 1fr;
+	grid-gap: 10px;
+	height: calc(100vh - 4.5em);
+	padding: 1em;
+}
+
+.content section:nth-child(1) {
+	grid-column: 1;
+	grid-row: span 3;
+}
+
+.content section:nth-child(2) {
+	grid-column: span 3;
+	grid-row: 1;
+}
+
+.content section:nth-child(3) {
+	grid-column: 2;
+	grid-row: span 3;
+}
+
+.content section:nth-child(4) {
+	grid-column: 3;
+	grid-row: span 2;
+}
+
+.content section:nth-child(5) {
+	grid-column: 3;
+	grid-row: 4;
+}
+
+.content section:nth-child(6) {
+	grid-column-end: span 3;
+	grid-row-end: span 1;
+}
+
+#file-display {
+	overflow-y: auto;
+}
+
+.code-line-wrapper {
+	display: flex;
+	flex-direction: row;
+	align-items: center;
+	tab-size: 4;
+}
+
+.code-line-wrapper > span {
+	width: var(--line-count-width);
+	margin-right: 0.75em;
+	font-family: 'Fira Code', monospace;
+	text-align: right;
+	color: grey;
+}
+
+.code-line::before {
+	content: attr(data-line-number);
+}
+
+.code-line {
+	cursor: pointer;
+}
+
+.line-break {
+	background-color: #18bc9c;
+	color: white;
+}
+
+section {
+	background-color: #E3E3E3;
+	padding: 1em;
+	font-family: monospace;
+	box-shadow: 2px 2px 3px grey;
+}
+
+input {
+	width: 100%;
+	max-width: 100%;
+	box-sizing: border-box;
+	margin-bottom: 1em;
+}
