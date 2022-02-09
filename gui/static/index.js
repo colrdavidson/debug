@@ -1,3 +1,6 @@
+let files = [];
+let current_file = 0;
+
 async function toggle_breakpoint(file_name, line_num) {
 	let line_elem = document.getElementById('code-line-' + line_num);
 	let toggle_val = line_elem.classList.toggle("line-break");
@@ -9,9 +12,43 @@ async function toggle_breakpoint(file_name, line_num) {
 	}
 }
 
+async function render_file_list() {
+	let ftree_display_elem = document.getElementById('ftree-display');
+	while (ftree_display_elem.firstChild) {
+		ftree_display_elem.removeChild(ftree_display_elem.firstChild);
+	}
+
+	let ftree_frag = document.createDocumentFragment();
+
+	for (let i = 0; i < files.length; i++) {
+		let file = files[i];
+		let fline = document.createElement("p");
+		let fname = document.createTextNode(file.name);
+
+		if (i == current_file) {
+			fline.classList.add("current-file");
+		} else {
+			let cur_idx = i.valueOf();
+			fline.addEventListener("click", () => { 
+				current_file = cur_idx;
+				get_file(files[current_file]);
+				render_file_list();
+			});
+		}
+
+		fline.appendChild(fname);
+		ftree_frag.appendChild(fline);
+	}
+
+	ftree_display_elem.appendChild(ftree_frag);
+}
+
 async function get_file_list() {
 	let response = await fetch('/get_file_list');
-	return await response.json();
+	let file_list = await response.json();
+	files = file_list.paths;
+
+	render_file_list();
 }
 
 async function step_program() {
@@ -137,7 +174,7 @@ async function get_file(path_blob) {
 }
 
 async function main() {
-	let file_list = await get_file_list();
-	await get_file(file_list.paths[0]);
+	await get_file_list();
+	await get_file(files[0]);
 	await get_registers();
 }

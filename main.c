@@ -2197,7 +2197,7 @@ void continue_to_next(DebugState *dbg, int pid, bool single_step) {
 	if (!lm) {
 		printf("Stopped @ 0x%llx\n", regs.rip);
 	} else {
-		printf("Stopped @ 0x%llx | line %u\n", regs.rip, lm->line_num);
+		printf("Stopped @ 0x%llx | line %u in file %u\n", regs.rip, lm->line_num, lm->file_idx);
 	}
 
 	if (triggerbits) {

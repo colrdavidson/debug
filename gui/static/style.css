@@ -40,13 +40,16 @@ nav > h2 {
 	padding: 0;
 }
 
+.current-file {
+	background-color: #8ff0dc;
+}
+
 .content {
 	display: grid;
-	grid-template-columns: 4em 1fr 15em;
+	grid-template-columns: 6em 1fr 15em;
 	grid-template-rows: 2.5em 1fr 1fr 1fr 1fr;
 	grid-gap: 10px;
-	height: calc(100vh - 4.5em);
-	padding: 1em;
+	height: calc(100vh - 2.5em);
 }
 
 .content section:nth-child(1) {
@@ -83,6 +86,16 @@ nav > h2 {
 	overflow-y: auto;
 }
 
+#ftree-display {
+	padding: 0;
+	padding-top: 1em;
+	padding-bottom: 1em;
+}
+
+#ftree-display > p {
+	padding: 0.25em;
+}
+
 .code-line-wrapper {
 	display: flex;
 	flex-direction: row;
@@ -91,7 +104,7 @@ nav > h2 {
 }
 
 .code-line-wrapper > span {
-	width: var(--line-count-width);
+	min-width: var(--line-count-width);
 	margin-right: 0.75em;
 	font-family: 'Fira Code', monospace;
 	text-align: right;
