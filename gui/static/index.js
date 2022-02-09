@@ -1,29 +1,85 @@
-function toggle_breakpoint(file_name, line_num) {
+async function toggle_breakpoint(file_name, line_num) {
 	let line_elem = document.getElementById('code-line-' + line_num);
 	let toggle_val = line_elem.classList.toggle("line-break");
 
 	if (toggle_val) {
-		console.log("Added breakpoint in file " + file_name + " on line " + line_num);
+		await fetch('/set_breakpoint?file=' + file_name + "&line=" + line_num);
 	} else {
-		console.log("Removed breakpoint in file " + file_name + " on line " + line_num);
+		await fetch('/clear_breakpoint?file=' + file_name + "&line=" + line_num);
 	}
 }
 
-async function get_file() {
-	let file_elem = document.getElementById('file-display');
+async function get_file_list() {
+	let response = await fetch('/get_file_list');
+	return await response.json();
+}
 
+async function step_program() {
+	await fetch('/step_program');
+	await get_registers();
+}
 
-	let response = await fetch('/get_file');
+async function continue_program() {
+	await fetch('/continue_program');
+	await get_registers();
+}
+
+async function get_registers() {
+	let response = await fetch('/get_registers');
+	let registers = await response.json();
+
+	let reg_display_elem = document.getElementById('register-display');
+	while (reg_display_elem.firstChild) {
+		reg_display_elem.removeChild(reg_display_elem.firstChild);
+	}
+
+	let reg_frag = document.createDocumentFragment();
+
+	let reg_header_elem = document.createElement("h3");
+	let reg_header_text = document.createTextNode("Registers");
+	reg_header_elem.appendChild(reg_header_text);
+	reg_frag.appendChild(reg_header_elem);
+
+	for (let i = 0; i < registers.length; i++) {
+		let register = registers[i];
+
+		let reg_line = document.createElement("div");
+		reg_line.classList.add("register-line");
+		
+		let reg_name = document.createTextNode(register.name + ":");
+		let reg_name_elem = document.createElement("p");
+		reg_name_elem.appendChild(reg_name);
+
+		let reg_val = document.createTextNode(register.value);
+		let reg_value_elem = document.createElement("span");
+		reg_value_elem.appendChild(reg_val);
+
+		reg_line.appendChild(reg_name_elem);
+		reg_line.appendChild(reg_value_elem);
+
+		reg_frag.appendChild(reg_line);	
+	}
+
+	reg_display_elem.appendChild(reg_frag);
+}
+
+async function get_file(path_blob) {
+	let file_path = path_blob.path + "/" + path_blob.name;
+	let response = await fetch('/get_file?file=' + file_path);
 	let file_blob = await response.json();
 
+	let file_elem = document.getElementById('file-display');
+	while (file_elem.firstChild) {
+		file_elem.removeChild(file_elem.firstChild);
+	}
+
 	let chunk = file_blob.data;
-	let file_name = file_blob.name;
+	let file_name = path_blob.name;
 
 	let re = /\n|\r|\r\n/gm;
 	let start_idx = 0;
 	let file_frag = document.createDocumentFragment();
 	let line_count = 1;
-
 
 	for (;;) {
 		let line_elem = document.createElement("div");
@@ -81,5 +137,7 @@ async function get_file() {
 }
 
 async function main() {
-	await get_file();
+	let file_list = await get_file_list();
+	await get_file(file_list.paths[0]);
+	await get_registers();
 }

@@ -19,8 +19,8 @@
 			</section>
 			<section>
 				<i class="fa fa-file" aria-hidden="true"></i>
-				<i class="fa fa-play" aria-hidden="true"></i>
-				<i class="fa fa-step-forward" aria-hidden="true"></i>
+				<i class="fa fa-play" aria-hidden="true" onclick="continue_program()"></i>
+				<i class="fa fa-step-forward" aria-hidden="true" onclick="step_program()"></i>
 				<i class="fa fa-repeat" aria-hidden="true"></i>
 			</section>
 			<section id="file-display"></section>
@@ -30,26 +30,7 @@
 				<p><b>Foo: </b>0</p>
 				<p><b>Bar: </b>501</p>
 			</section>
-			<section>
-				<h3>Registers</h3>
-				<p><b>RIP: </b>0</p>
-				<p><b>RAX: </b>0x4fcee</p>
-				<p><b>RBX: </b>0</p>
-				<p><b>RCX: </b>0</p>
-				<p><b>RDX: </b>0</p>
-				<p><b>RDI: </b>0</p>
-				<p><b>RSI: </b>0</p>
-				<p><b>RSP: </b>0</p>
-				<p><b>RBP: </b>0</p>
-				<p><b>R8 : </b>0</p>
-				<p><b>R9 : </b>0x7ffee10101f44</p>
-				<p><b>R10: </b>2</p>
-				<p><b>R11: </b>5</p>
-				<p><b>R12: </b>0</p>
-				<p><b>R13: </b>0</p>
-				<p><b>R14: </b>0</p>
-				<p><b>R15: </b>0</p>
-			</section>
+			<section id="register-display"></section>
 			<section>
 				<h3>Memory</h3>
 				<p><b>0x7ffee10101f44: </b>0x40 0x50 0x10 0x12 0x13 0x40 0x50 0x10 0x12 0x13</p>

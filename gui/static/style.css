@@ -111,6 +111,19 @@ nav > h2 {
 	color: white;
 }
 
+.register-line {
+	display: flex;
+	flex-direction: row;
+	align-items: center;
+	font-family: 'Fira Code', monospace;
+}
+.register-line > p {
+	font-weight: bold;
+	margin-right: 0.25rem;
+	font-size: 1.125rem;
+	width: 4ch;
+}
+
 section {
 	background-color: #E3E3E3;
 	padding: 1em;
