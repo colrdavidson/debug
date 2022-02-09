@@ -1,6 +1,7 @@
 let files = [];
 let breakpoints = [];
 let current_file = 0;
+let current_position = {address: "", line: "", file: ""};
 
 async function toggle_breakpoint(file_name, line_num) {
 	let line_elem = document.getElementById('code-line-' + line_num);
@@ -16,7 +17,8 @@ async function toggle_breakpoint(file_name, line_num) {
 async function update_ftree_file() {
 	await get_file(files[current_file]);
 	await render_file_list();
-	await render_breakpoints();
+	render_breakpoints();
+	render_position(current_position);
 }
 
 async function render_file_list() {
@@ -120,11 +122,24 @@ async function get_registers() {
 	reg_display_elem.appendChild(reg_frag);
 }
 
+function render_position(position) {
+	if (position.file == files[current_file].name) {
+		let line_elem = document.getElementById('code-line-' + position.line);
+		line_elem.classList.add("line-active");
+	}
+}
+
 async function get_current_position() {
 	let response = await fetch('/current_position');
-	let position = await response.json();
+	let new_position = await response.json();
 
-	console.log(position);
+	render_position(new_position);
+	if (current_position.line != "") {
+		let old_line_elem = document.getElementById('code-line-' + current_position.line);
+		old_line_elem.classList.remove("line-active");
+	}
+
+	current_position = new_position;
 }
 
 function render_breakpoints() {

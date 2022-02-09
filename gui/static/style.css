@@ -100,6 +100,10 @@ nav > h2 {
 	cursor: pointer;
 }
 
+#register-display {
+	overflow-y: auto;
+}
+
 .code-line-wrapper {
 	display: flex;
 	flex-direction: row;
@@ -126,6 +130,11 @@ nav > h2 {
 .line-break {
 	background-color: #18bc9c;
 	color: white;
+}
+
+.line-active {
+	background-color: #8ff0dc !important;
+	color: black;
 }
 
 .register-line {

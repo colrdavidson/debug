@@ -240,11 +240,12 @@ func get_current_position(w http.ResponseWriter, r *http.Request, dbg *DebugStat
 
 	pos_chunks := strings.Split(str_data, " ")
 	address := pos_chunks[0]
-	line := "(None)"
-	file := "(None)"
+	line := ""
+	file := ""
 	if len(pos_chunks) == 3 {
-		line = pos_chunks[0]
-		file = pos_chunks[1]
+		line = pos_chunks[1]
+		file = pos_chunks[2]
+		file = file[:len(file)-1] // strip off trailing newline
 	}
 
 	pi := PositionInfo{Address: address, Line: line, File: file}
