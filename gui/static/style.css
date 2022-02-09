@@ -96,6 +96,10 @@ nav > h2 {
 	padding: 0.25em;
 }
 
+#ftree-display > p:not(.current-file) {
+	cursor: pointer;
+}
+
 .code-line-wrapper {
 	display: flex;
 	flex-direction: row;
@@ -149,4 +153,16 @@ input {
 	max-width: 100%;
 	box-sizing: border-box;
 	margin-bottom: 1em;
+}
+
+i {
+	cursor: pointer;
+}
+
+i:hover {
+	color: darkgrey;
+}
+
+i:active {
+	color: darkgrey;
 }

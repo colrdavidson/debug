@@ -1402,6 +1402,7 @@ void build_line_tables(DWSections *sections, CULineTable **ext_line_table, uint6
 		i += rem_size;
 	}
 
+
 	// Process Line Ops
 	for (uint64_t i = 0; i < *line_tables_len; i++) {
 		CULineTable *line_table = &line_tables[i];
@@ -1543,6 +1544,37 @@ void init_debug_state(DebugState *dbg, char *bin_name) {
 	dbg->should_reset = false;
 }
 
+uint64_t find_next_line_addr_in_file(DebugState *dbg, char *break_file, uint32_t break_line) {
+	uint64_t err = ~0;
+
+	for (uint64_t i = 0; i < dbg->line_tables_len; i++) {
+		CULineTable *line_table = &dbg->line_tables[i];
+		int j;
+
+		uint32_t break_file_idx = 0;
+		for (j = 1; j < line_table->file_count; j++) {
+			if (!(strcmp(line_table->filenames[j], break_file))) {
+				break_file_idx = j;
+				break;
+			}
+		}
+		if (j == line_table->file_count) {
+			return err;
+		}
+
+		for (int j = 0; j < line_table->line_count; j++) {
+			LineMachine line = line_table->lines[j];
+
+			if (line.line_num > break_line && break_file_idx == line.file_idx) {
+				printf("next line from %u is %u, address 0x%lx\n", break_line, line.line_num, line.address);
+				return line.address;
+			}
+		}
+	}
+
+	return err;
+}
+
 uint64_t find_line_addr_in_file(DebugState *dbg, char *break_file, uint32_t break_line) {
 	uint64_t break_addr = ~0;
 
@@ -1577,21 +1609,29 @@ uint64_t find_line_addr_in_file(DebugState *dbg, char *break_file, uint32_t brea
 	return break_addr;
 }
 
-void get_approx_line_for_addr(DebugState *dbg, uint64_t addr, LineMachine **lm) {
+typedef struct {
+	uint64_t line;
+	uint64_t address;
+	char *file;
+} FileLine;
+
+int get_approx_line_for_addr(DebugState *dbg, uint64_t addr, FileLine *fl) {
 	for (uint64_t i = 0; i < dbg->line_tables_len; i++) {
 		CULineTable *line_table = &dbg->line_tables[i];
 
 		for (int j = 0; j < line_table->line_count; j++) {
-			LineMachine line = line_table->lines[j];
+			LineMachine *line = &line_table->lines[j];
 
-			if (line.address >= addr) {
-				*lm = &dbg->line_tables[i].lines[j];
-				return;
+			if (line->address >= addr) {
+				fl->line    = line->line_num;
+				fl->address = line->address;
+				fl->file    = line_table->filenames[line->file_idx];
+				return 1;
 			}
 		}
 	}
 
-	*lm = NULL;
+	return 0;
 }
 
 FuncFrame *find_function_frame(Block *block_table, uint64_t block_len, char *func_name, FuncFrame *ff) {
@@ -1611,14 +1651,13 @@ FuncFrame *find_function_frame_approx(DebugState *dbg, char *func_name, FuncFram
 	if (find_function_frame(dbg->block_table, dbg->block_len, func_name, ff)) {
 		ff->start += 4;
 
-		LineMachine *lm = NULL;
-		get_approx_line_for_addr(dbg, ff->start, &lm);
-		if (!lm) {
+		FileLine fl = {0};
+		if (!get_approx_line_for_addr(dbg, ff->start, &fl)) {
 			panic("failed to get line for address!\n");
 		}
 
-		if (ff->end > lm->address) {
-			ff->start = lm->address;
+		if (ff->end > fl.address) {
+			ff->start = fl.address;
 		}
 
 		ff->end -= 1;
@@ -1822,15 +1861,18 @@ void inject_breakpoint_at_addr(int pid, Breakpoint *br, uint64_t addr) {
 	br->orig_data = orig_data;
 }
 
-void add_breakpoint(int pid, Breakpoint *br, uint64_t addr) {
+void add_breakpoint(int pid, Breakpoint *br, uint64_t addr, bool permanent) {
 	if (br->ref_count > 0) {
 		printf("Doing a ref skip!\n");
-		br->ref_count += 1;
-		return;
+		goto ref_end;
 	}
 
 	inject_breakpoint_at_addr(pid, br, addr);
-	br->ref_count += 1;
+
+ref_end:
+	if (permanent) {
+		br->ref_count += 1;
+	}
 }
 
 void reset_breakpoint(DebugState *dbg, int pid) {
@@ -2141,7 +2183,7 @@ void add_watchpoint(DebugState *dbg, int pid, char *var_name) {
 
 			Breakpoint *br = &dbg->break_table[dbg->break_len];
 			printf("Breakpoint added @ 0x%lx\n", wp->end);
-			add_breakpoint(pid, br, wp->end);
+			add_breakpoint(pid, br, wp->end, true);
 			dbg->break_len++;
 		}
 		
@@ -2192,12 +2234,11 @@ void continue_to_next(DebugState *dbg, int pid, bool single_step) {
 	}
 
 	ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-	LineMachine *lm = NULL;
-	get_approx_line_for_addr(dbg, regs.rip, &lm);
-	if (!lm) {
+	FileLine fl = {0};
+	if (!get_approx_line_for_addr(dbg, regs.rip - 1, &fl)) {
 		printf("Stopped @ 0x%llx\n", regs.rip);
 	} else {
-		printf("Stopped @ 0x%llx | line %u in file %u\n", regs.rip, lm->line_num, lm->file_idx);
+		printf("Stopped @ 0x%llx | line %lu in file %s\n", regs.rip, fl.line, fl.file);
 	}
 
 	if (triggerbits) {
@@ -2368,50 +2409,87 @@ void gather_registers(int pid, dol_t *p) {
 	p->offset += sprintf((char *)p->data + p->offset, "R15: 0x%llx\n", regs.r15);
 }
 
-void process_command(DebugState *dbg, int pid, int conn, char *line, uint64_t line_size) {
-	uint8_t outbuf[OUTBUF_MAX] = {0};
-	dol_t p = { .data = outbuf, .offset = 0, .length = OUTBUF_MAX };
+void goto_next_flowline(DebugState *dbg, int pid) {
+	struct user_regs_struct regs;
+	ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+
+	FileLine fl = {0};
+	if (!get_approx_line_for_addr(dbg, regs.rip, &fl)) {
+		panic("failed to get line for rip!\n");
+	}
+
+	uint64_t break_addr = find_next_line_addr_in_file(dbg, fl.file, fl.line);
+	if (break_addr == (uint64_t)~0) {
+		printf("Unable to find line after %lu\n", fl.line);
+		return;
+	}
+
+	Breakpoint *br = &dbg->break_table[dbg->break_len++];
+	add_breakpoint(pid, br, break_addr, false);
+	printf("Set breakpoint @ 0x%lx\n", break_addr);
+	continue_to_next(dbg, pid, false);
+}
+
+void goto_next_line(DebugState *dbg, int pid) {
+	struct user_regs_struct regs;
+	ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+
+	FileLine fl = {0};
+	if (!get_approx_line_for_addr(dbg, regs.rip, &fl)) {
+		panic("failed to get line for rip!\n");
+	}
+
+	uint64_t break_addr = find_next_line_addr_in_file(dbg, fl.file, fl.line);
+	if (break_addr == (uint64_t)~0) {
+		printf("Unable to find line after %lu\n", fl.line);
+		return;
+	}
+
+	Breakpoint *br = &dbg->break_table[dbg->break_len++];
+	add_breakpoint(pid, br, break_addr, false);
+	printf("Set breakpoint @ 0x%lx\n", break_addr);
+	continue_to_next(dbg, pid, false);
+}
+
+int process_command(DebugState *dbg, int pid, char *line, uint64_t line_size, dol_t *outbuf) {
+	struct user_regs_struct regs;
 
 	if (!strcmp(line, "c")) {
 		continue_to_next(dbg, pid, false);
 	} else if (!strcmp(line, "fs")) {
-
 		for (uint64_t i = 0; i < dbg->block_len; i++) {
 			Block *b = &dbg->block_table[i];	
 
 			if (b->type == DW_TAG_compile_unit) {
-				p.offset += sprintf((char *)p.data + p.offset, "%s %s\n", b->comp_dir, b->name);
-				if (p.offset > p.length) {
+				outbuf->offset += sprintf((char *)outbuf->data + outbuf->offset, "%s %s\n", b->comp_dir, b->name);
+				if (outbuf->offset > outbuf->length) {
 					panic("too many file paths!\n");
 				}
 			}
 		}
+	} else if (!strcmp(line, "pb")) {
+		for (uint64_t i = 0; i < dbg->break_len; i++) {
+			Breakpoint *bp = &dbg->break_table[i];
 
-		send(conn, p.data, p.offset, 0);
-/*
-	} else if (line_size > 3 && line[0] == 'f' && line[1] == ' ') {
-		char *file_path = line + 2;
+			FileLine fl = {0};
+			if (!get_approx_line_for_addr(dbg, bp->address, &fl)) {
+				outbuf->offset += sprintf((char *)outbuf->data + outbuf->offset, "0x%lx\n", bp->address);
+			} else {
+				outbuf->offset += sprintf((char *)outbuf->data + outbuf->offset, "0x%lx %lu %s\n", bp->address, fl.line, fl.file);
+			}
 
-		int fd = open(file_path, O_RDONLY);
-		if (fd < 0) {
-			panic("failed to open %s\n", file_path);
+			if (outbuf->offset > outbuf->length) {
+				panic("too many breakpoints!\n");
+			}
 		}
-
-		uint64_t size = get_file_size(fd);
-		char *file_buf = (char *)malloc(size);
-		read(fd, file_buf, size);
-		close(fd);
-
-		int ret = send(conn, file_buf, size, 0);
-		if (ret < 0) {
-			panic("failed to send!\n");
+	} else if (!strcmp(line, "pc")) {
+		ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+		FileLine fl = {0};
+		if (!get_approx_line_for_addr(dbg, regs.rip, &fl)) {
+			outbuf->offset += sprintf((char *)outbuf->data + outbuf->offset, "0x%llx\n", regs.rip);
+		} else {
+			outbuf->offset += sprintf((char *)outbuf->data + outbuf->offset, "0x%llx %lu %s\n", regs.rip, fl.line, fl.file);
 		}
-		if ((uint64_t)ret != size) {
-			panic("failed to send the whole file!\n");
-		}
-
-		free(file_buf);
-*/
 	} else if (line_size > 3 && line[0] == 'w' && line[1] == ' ') {
 		char *watch_name = line + 2;
 		add_watchpoint(dbg, pid, watch_name);
@@ -2422,11 +2500,11 @@ void process_command(DebugState *dbg, int pid, int conn, char *line, uint64_t li
 		uint64_t break_addr = strtol(break_str, &break_end, 0);
 		if (break_str == break_end) {
 			printf("Invalid breakpoint address: %s\n", break_str);
-			return;
+			return 0;
 		}
 
 		Breakpoint *br = &dbg->break_table[dbg->break_len++];
-		add_breakpoint(pid, br, break_addr);
+		add_breakpoint(pid, br, break_addr, true);
 		printf("Set breakpoint @ 0x%lx\n", break_addr);
 	} else if (line_size > 4 && line[0] == 'b' && line[1] == 'l' && line[2] == ' ') {
 		char *break_str = line + 3;
@@ -2435,14 +2513,14 @@ void process_command(DebugState *dbg, int pid, int conn, char *line, uint64_t li
 		uint64_t break_line_num = strtol(break_str, &break_end, 0);
 		if (break_str == break_end) {
 			printf("Invalid line break: %s\n", break_str);
-			return;
+			return 0;
 		}
 
 		uint64_t rem_size = strlen(break_end);
 		printf("%s | %lu\n", break_end, rem_size);
 		if (break_end[0] != ' ') {
 			printf("command requires a file name\n");
-			return;
+			return 0;
 		}
 
 		char *file_name = break_end + 1;
@@ -2450,17 +2528,20 @@ void process_command(DebugState *dbg, int pid, int conn, char *line, uint64_t li
 		uint64_t break_addr = find_line_addr_in_file(dbg, file_name, break_line_num);
 		if (break_addr == (uint64_t)~0) {
 			printf("Unable to find line %lu\n", break_line_num);
-			return;
+			return 0;
 		}
 
 		Breakpoint *br = &dbg->break_table[dbg->break_len++];
-		add_breakpoint(pid, br, break_addr);
+		add_breakpoint(pid, br, break_addr, true);
 		printf("Set breakpoint @ 0x%lx\n", break_addr);
 	} else if (!strcmp(line, "s")) {
+		goto_next_line(dbg, pid);
+	} else if (!strcmp(line, "si")) {
+		goto_next_flowline(dbg, pid);
+	} else if (!strcmp(line, "sa")) {
 		continue_to_next(dbg, pid, true);
 	} else if (!strcmp(line, "p")) {
-		gather_registers(pid, &p);
-		send(conn, p.data, p.offset, 0);
+		gather_registers(pid, outbuf);
 	} else if (line_size > 3 && line[0] == 'p' && line[1] == ' ') {
 		char *var_name = line + 2;
 
@@ -2470,13 +2551,13 @@ void process_command(DebugState *dbg, int pid, int conn, char *line, uint64_t li
 		CurrentScopes scopes = {0};
 		if (!get_scopes(dbg, regs.rip, &scopes)) {
 			printf("Failed to find scope!\n");
-			return;
+			return 0;
 		}
 
 		VarInfo info = get_var_for_name(dbg, &scopes, var_name);
 		if (info.var_idx == (uint64_t)~0) {
 			printf("Failed to find variable %s\n", var_name);
-			return;
+			return 0;
 		}
 
 		Block *var = &dbg->block_table[info.var_idx];
@@ -2513,8 +2594,11 @@ void process_command(DebugState *dbg, int pid, int conn, char *line, uint64_t li
 		printf("b -- break at address\n");
 		printf("q -- quit\n");
 	} else {
-		panic("Command %s not recognized\n", line);
+		printf("Command %s not recognized\n", line);
+		return 0;
 	}
+
+	return 1;
 }
 
 int main(int argc, char **argv) {
@@ -2542,6 +2626,7 @@ int main(int argc, char **argv) {
 	waitpid(pid, &status, 0);
 
 	print_block_table(dbg.block_table, dbg.block_len);
+	print_line_table(dbg.line_tables, dbg.line_tables_len);
 
 	struct sockaddr_in serv_addr = {0};
 	uint16_t port = 5000;
@@ -2559,6 +2644,11 @@ int main(int argc, char **argv) {
 	listen(listen_fd, 1);
 
 	int conn_fd = accept(listen_fd, (struct sockaddr *)NULL, NULL);
+
+	uint8_t outbuf[OUTBUF_MAX] = {0};
+	dol_t out = { .data = outbuf, .offset = 0, .length = OUTBUF_MAX };
+	uint8_t packetbuf[OUTBUF_MAX + 5] = {0};
+	dol_t packet = { .data = packetbuf, .offset = 0, .length = OUTBUF_MAX + 5 };
 
 	char line_buffer[LINE_BUFFER_MAX + 1];
 	uint64_t used_bytes = 0;
@@ -2582,8 +2672,34 @@ int main(int argc, char **argv) {
 		for (uint64_t i = line_start; i < used_bytes; i++) {
 			if (line_buffer[i] == '\n') {
 				line_buffer[i] = 0;
-				process_command(&dbg, pid, conn_fd, line_buffer + new_start, i - new_start);
+				printf("RECV %lu [%.*s]\n", i - new_start, (int)(i - new_start), line_buffer + new_start);
+
+				int ret = process_command(&dbg, pid, line_buffer + new_start, i - new_start, &out);
 				new_start = i + 1;
+
+				if (out.offset > out.length) {
+					panic("outbound buffer too full!\n");
+				}
+
+				if (ret) {
+					packet.offset = sprintf((char *)packet.data, "ok %lu %.*s", out.offset, (int)out.offset, out.data);
+				} else {
+					packet.offset = sprintf((char *)packet.data, "no %lu %.*s", out.offset, (int)out.offset, out.data);
+				}
+
+				printf("SEND %lu [%s]\n", packet.offset, packet.data);
+
+				ssize_t ret_size = send(conn_fd, packet.data, packet.offset, 0);
+				if (!ret_size) {
+					happy_death("GUI server closed!\n");
+				} else if (ret_size < 0) {
+					panic("recv failed!\n");
+				}
+
+				memset(out.data, 0, ret_size);
+				memset(packet.data, 0, packet.offset);
+				out.offset = 0;
+				packet.offset = 0;
 			}
 		}
 

@@ -1,4 +1,5 @@
 let files = [];
+let breakpoints = [];
 let current_file = 0;
 
 async function toggle_breakpoint(file_name, line_num) {
@@ -10,6 +11,12 @@ async function toggle_breakpoint(file_name, line_num) {
 	} else {
 		await fetch('/clear_breakpoint?file=' + file_name + "&line=" + line_num);
 	}
+}
+
+async function update_ftree_file() {
+	await get_file(files[current_file]);
+	await render_file_list();
+	await render_breakpoints();
 }
 
 async function render_file_list() {
@@ -31,8 +38,7 @@ async function render_file_list() {
 			let cur_idx = i.valueOf();
 			fline.addEventListener("click", () => { 
 				current_file = cur_idx;
-				get_file(files[current_file]);
-				render_file_list();
+				update_ftree_file();
 			});
 		}
 
@@ -51,14 +57,28 @@ async function get_file_list() {
 	render_file_list();
 }
 
-async function step_program() {
-	await fetch('/step_program');
+async function single_step() {
+	await fetch('/single_step');
 	await get_registers();
+	await get_current_position();
 }
 
-async function continue_program() {
-	await fetch('/continue_program');
+async function step_into() {
+	await fetch('/step_into');
 	await get_registers();
+	await get_current_position();
+}
+
+async function run_line() {
+	await fetch('/run_line');
+	await get_registers();
+	await get_current_position();
+}
+
+async function cont() {
+	await fetch('/cont');
+	await get_registers();
+	await get_current_position();
 }
 
 async function get_registers() {
@@ -98,6 +118,29 @@ async function get_registers() {
 	}
 
 	reg_display_elem.appendChild(reg_frag);
+}
+
+async function get_current_position() {
+	let response = await fetch('/current_position');
+	let position = await response.json();
+
+	console.log(position);
+}
+
+function render_breakpoints() {
+	for (let i = 0; i < breakpoints.length; i++) {
+		let bp = breakpoints[i];
+		if (bp.file == files[current_file].name) {
+			let line_elem = document.getElementById('code-line-' + bp.line);
+			line_elem.classList.add("line-break");
+		}
+	}
+}
+
+async function get_breakpoints() {
+	let response = await fetch('/breakpoints');
+	breakpoints = await response.json();	
+	render_breakpoints();
 }
 
 async function get_file(path_blob) {
@@ -177,4 +220,6 @@ async function main() {
 	await get_file_list();
 	await get_file(files[0]);
 	await get_registers();
+	await get_current_position();
+	await get_breakpoints();
 }
