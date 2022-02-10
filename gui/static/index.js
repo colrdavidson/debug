@@ -1,84 +1,9 @@
 let files = [];
 let breakpoints = [];
+let registers = [];
 let current_file = 0;
 let current_position = {address: "", line: "", file: ""};
-
-async function toggle_breakpoint(file_name, line_num) {
-	let line_elem = document.getElementById('code-line-' + line_num);
-	let toggle_val = line_elem.classList.toggle("line-break");
-
-	if (toggle_val) {
-		await fetch('/set_breakpoint?file=' + file_name + "&line=" + line_num);
-	} else {
-		await fetch('/clear_breakpoint?file=' + file_name + "&line=" + line_num);
-	}
-}
-
-async function update_ftree_file() {
-	await get_file(files[current_file]);
-	await render_file_list();
-	render_breakpoints();
-	render_position(current_position);
-}
-
-async function render_file_list() {
-	let ftree_display_elem = document.getElementById('ftree-display');
-
-	let ftree_frag = document.createDocumentFragment();
-
-	for (let i = 0; i < files.length; i++) {
-		let file = files[i];
-		let fline = document.createElement("p");
-		let fname = document.createTextNode(file.name);
-
-		if (i == current_file) {
-			fline.classList.add("current-file");
-		} else {
-			let cur_idx = i.valueOf();
-			fline.addEventListener("click", () => { 
-				current_file = cur_idx;
-				update_ftree_file();
-			});
-		}
-
-		fline.appendChild(fname);
-		ftree_frag.appendChild(fline);
-	}
-
-	attach_frag_children(ftree_display_elem, ftree_frag);	
-}
-
-async function get_file_list() {
-	let response = await fetch('/get_file_list');
-	let file_list = await response.json();
-	files = file_list.paths;
-
-	render_file_list();
-}
-
-async function single_step() {
-	await fetch('/single_step');
-	await get_registers();
-	await get_current_position();
-}
-
-async function step_into() {
-	await fetch('/step_into');
-	await get_registers();
-	await get_current_position();
-}
-
-async function run_line() {
-	await fetch('/run_line');
-	await get_registers();
-	await get_current_position();
-}
-
-async function cont() {
-	await fetch('/cont');
-	await get_registers();
-	await get_current_position();
-}
+let last_position    = {address: "", line: "", file: ""};
 
 function attach_frag_children(host_elem, frag_elem) {
 	if (host_elem.firstChild) {
@@ -91,10 +16,100 @@ function attach_frag_children(host_elem, frag_elem) {
 	}
 }
 
+async function toggle_breakpoint(file_name, line_num) {
+	let line_elem = document.getElementById('code-line-' + line_num);
+	let toggle_val = line_elem.classList.toggle("line-break");
+
+	if (toggle_val) {
+		await fetch('/set_breakpoint?file=' + file_name + "&line=" + line_num);
+	} else {
+		await fetch('/clear_breakpoint?file=' + file_name + "&line=" + line_num);
+	}
+
+	await get_breakpoints();
+}
+
+async function get_file_list() {
+	let response = await fetch('/get_file_list');
+	let file_list = await response.json();
+	files = file_list.paths;
+	current_file = 0;
+
+	for (let i = 0; i < files.length; i++) {
+		files[i].data = await get_file(files[i]);
+	}
+}
+
+async function get_file(path_blob) {
+	let file_path = path_blob.path + "/" + path_blob.name;
+	let response = await fetch('/get_file?file=' + file_path);
+	let file_blob = await response.json();
+	return file_blob;
+}
+
+async function single_step() {
+	await fetch('/single_step');
+	await get_registers();
+	await get_current_position();
+
+	render_page();
+}
+
+async function step_into() {
+	await fetch('/step_into');
+	await get_registers();
+	await get_current_position();
+
+	render_page();
+}
+
+async function run_line() {
+	await fetch('/run_line');
+	await get_registers();
+	await get_current_position();
+
+	render_page();
+}
+
+async function cont() {
+	await fetch('/cont');
+	await get_registers();
+	await get_current_position();
+
+	render_page();
+}
+
+async function restart() {
+	await fetch('/restart');
+	current_position = {address: "", line: "", file: ""};
+	old_position = {address: "", line: "", file: ""};
+
+	await get_registers();
+	await get_current_position();
+	await get_breakpoints();
+
+	render_page();
+}
+
 async function get_registers() {
 	let response = await fetch('/get_registers');
-	let registers = await response.json();
+	registers = await response.json();
+}
 
+async function get_current_position() {
+	let response = await fetch('/current_position');
+	let new_position = await response.json();
+
+	old_position = current_position;
+	current_position = new_position;
+}
+
+async function get_breakpoints() {
+	let response = await fetch('/breakpoints');
+	breakpoints = await response.json();	
+}
+
+function render_registers() {
 	let reg_display_elem = document.getElementById('register-display');
 	let reg_frag = document.createDocumentFragment();
 
@@ -126,25 +141,31 @@ async function get_registers() {
 	attach_frag_children(reg_display_elem, reg_frag);
 }
 
-function render_position(position) {
-	if (position.file == files[current_file].name) {
-		let line_elem = document.getElementById('code-line-' + position.line);
-		line_elem.classList.add("line-active");
+function render_file_list() {
+	let ftree_display_elem = document.getElementById('ftree-display');
+
+	let ftree_frag = document.createDocumentFragment();
+
+	for (let i = 0; i < files.length; i++) {
+		let file = files[i];
+		let fline = document.createElement("p");
+		let fname = document.createTextNode(file.name);
+
+		if (i == current_file) {
+			fline.classList.add("current-file");
+		} else {
+			let cur_idx = i.valueOf();
+			fline.addEventListener("click", () => { 
+				current_file = cur_idx;
+				render_page();
+			});
+		}
+
+		fline.appendChild(fname);
+		ftree_frag.appendChild(fline);
 	}
-}
 
-async function get_current_position() {
-	let response = await fetch('/current_position');
-	let new_position = await response.json();
-
-	render_position(new_position);
-
-	if (current_position.line != "" && current_position.line != new_position.line && current_position.file == files[current_file].name) {
-		let old_line_elem = document.getElementById('code-line-' + current_position.line);
-		old_line_elem.classList.remove("line-active");
-	}
-
-	current_position = new_position;
+	attach_frag_children(ftree_display_elem, ftree_frag);	
 }
 
 function render_breakpoints() {
@@ -157,21 +178,27 @@ function render_breakpoints() {
 	}
 }
 
-async function get_breakpoints() {
-	let response = await fetch('/breakpoints');
-	breakpoints = await response.json();	
-	render_breakpoints();
+function render_position() {
+	if (current_position.line == "") {
+		return;
+	}
+
+	if (current_position.file == files[current_file].name) {
+		let line_elem = document.getElementById('code-line-' + current_position.line);
+		line_elem.classList.add("line-active");
+	}
+
+	if (current_position.line != "" && current_position.line != old_position.line && old_position.file == files[current_file].name) {
+		let old_line_elem = document.getElementById('code-line-' + old_position.line);
+		old_line_elem.classList.remove("line-active");
+	}
 }
 
-async function get_file(path_blob) {
-	let file_path = path_blob.path + "/" + path_blob.name;
-	let response = await fetch('/get_file?file=' + file_path);
-	let file_blob = await response.json();
-
+function render_file(file) {
 	let file_elem = document.getElementById('file-display');
 
-	let chunk = file_blob.data;
-	let file_name = path_blob.name;
+	let chunk = file.data.data;
+	let file_name = file.name;
 
 	let re = /\n|\r|\r\n/gm;
 	let start_idx = 0;
@@ -232,10 +259,28 @@ async function get_file(path_blob) {
 	attach_frag_children(file_elem, file_frag);
 }
 
+
+function render_page() {
+	render_registers();
+
+	for (let i = 0; i < files.length; i++) {
+		if (files[i].name == current_position.file) {
+			current_file = i;
+			break;
+		}
+	}
+
+	render_file_list();
+	render_file(files[current_file]);
+	render_breakpoints();
+	render_position();
+}
+
 async function main() {
 	await get_file_list();
-	await get_file(files[0]);
 	await get_registers();
 	await get_current_position();
 	await get_breakpoints();
+
+	render_page();
 }

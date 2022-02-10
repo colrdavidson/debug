@@ -280,6 +280,13 @@ func continue_program(w http.ResponseWriter, r *http.Request, dbg *DebugState) {
 	_ = run_command(dbg, "c\n")
 }
 
+func restart(w http.ResponseWriter, r *http.Request, dbg *DebugState) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	_ = run_command(dbg, "r\n")
+}
+
 type DebugState struct {
 	conn net.Conn
 	lock sync.Mutex
@@ -307,6 +314,7 @@ func main() {
 	http.HandleFunc("/get_file_list", func(w http.ResponseWriter, req *http.Request) { get_file_list(w, req, dbg) })
 	http.HandleFunc("/breakpoints", func(w http.ResponseWriter, req *http.Request) { get_breakpoints(w, req, dbg) })
 	http.HandleFunc("/current_position", func(w http.ResponseWriter, req *http.Request) { get_current_position(w, req, dbg) })
+	http.HandleFunc("/restart", func(w http.ResponseWriter, req *http.Request) { restart(w, req, dbg) })
 	http.Handle("/", fs)
 
 	log.Printf("Listening on %s...\n", port_str)

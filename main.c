@@ -283,6 +283,7 @@ typedef struct {
 	uint64_t file_size;
 
 	char *bin_name;
+	char **args;
 	char cur_dir[PATH_MAX + 1];
 
 	uint8_t *strtab;
@@ -344,6 +345,8 @@ typedef struct {
 	Watchpoint *watch_table;
 	uint64_t watch_len;
 	uint64_t watch_max;
+
+	bool needs_restart;
 
 	bool should_reset;
 	uint64_t reset_idx;
@@ -800,7 +803,7 @@ int open_binary(char *name, char **prog_path) {
 
 	fd = open(name, O_RDONLY);
 	if (fd >= 0) {
-		*prog_path = name;
+		strcpy(*prog_path, name);
 		return fd;
 
 	}
@@ -1522,9 +1525,11 @@ void build_line_tables(DWSections *sections, CULineTable **ext_line_table, uint6
 	}
 }
 
-void init_debug_state(DebugState *dbg, char *bin_name) {
+void init_debug_state(DebugState *dbg, char *bin_name, char **args) {
 	memset(&dbg->sections, 0, sizeof(dbg->sections));
 	load_elf_sections(&dbg->sections, bin_name);
+	dbg->sections.args = args;
+
 	get_dynamic_libraries(&dbg->sections);
 
 	dbg->block_max = BLOCK_MAX;
@@ -1551,6 +1556,52 @@ void init_debug_state(DebugState *dbg, char *bin_name) {
 
 	dbg->reset_idx = 0;
 	dbg->should_reset = false;
+}
+
+void reset_checks(DebugState *dbg) {
+	free(dbg->break_table);
+
+	for (uint64_t i = 0; i < dbg->watch_len; i++) {
+		free(dbg->watch_table[i].old_data);
+		free(dbg->watch_table[i].new_data);
+	}
+	free(dbg->watch_table);
+
+	dbg->break_max = BREAKPOINTS_MAX;
+	dbg->break_table = (Breakpoint *)calloc(sizeof(Breakpoint), dbg->break_max);
+	dbg->break_len = 0;
+
+	dbg->watch_max = WATCHPOINTS_MAX;
+	dbg->watch_table = (Watchpoint *)calloc(sizeof(Watchpoint), dbg->watch_max);
+	dbg->watch_len = 0;
+
+	memset(dbg->hw_slots, 0, sizeof(dbg->hw_slots));
+	dbg->hw_slots_max = HW_SLOTS_MAX;
+	dbg->sw_watch_enabled = false;
+
+	dbg->reset_idx = 0;
+	dbg->should_reset = false;
+}
+
+void free_debug_state(DebugState *dbg) {
+	free(dbg->block_table);
+
+	for (uint64_t i = 0; i < dbg->line_tables_len; i++) {
+		free(dbg->line_tables[i].lines);
+	}
+	free(dbg->line_tables);
+	free(dbg->break_table);
+
+	for (uint64_t i = 0; i < dbg->watch_len; i++) {
+		free(dbg->watch_table[i].old_data);
+		free(dbg->watch_table[i].new_data);
+	}
+	free(dbg->watch_table);
+
+	free(dbg->sections.bin_name);
+	free(dbg->sections.file_buffer);
+
+	memset(dbg, 0, sizeof(DebugState));
 }
 
 uint64_t find_next_line_addr_in_file(DebugState *dbg, char *break_file, uint32_t break_line) {
@@ -2226,7 +2277,9 @@ void continue_to_next(DebugState *dbg, int pid, bool single_step) {
 	waitpid(pid, &status, 0);
 	if (!WIFSTOPPED(status)) {
 		int ret_val = WEXITSTATUS(status);
-		happy_death("Program died with return code %d, bye!\n", ret_val);
+		printf("Program died with return code %d, bye!\n", ret_val);
+		dbg->needs_restart = true;
+		return;
 	}
 
 	uint64_t dr6 = ptrace(PTRACE_PEEKUSER, pid, (void *)offsetof(struct user, u_debugreg[6]), NULL);
@@ -2460,11 +2513,110 @@ void goto_next_line(DebugState *dbg, int pid) {
 	continue_to_next(dbg, pid, false);
 }
 
-int process_command(DebugState *dbg, int pid, char *line, uint64_t line_size, dol_t *outbuf) {
+int start_debugger(char *bin_name, char **args) {
+	int pid = fork();
+	if (pid == 0) {
+		ptrace(PTRACE_TRACEME, 0, NULL, NULL);
+
+		// Turn off stack address randomization for more consistent debugging
+		personality(ADDR_NO_RANDOMIZE);
+		execvp(bin_name, args);
+
+		panic("Failed to run program %s\n", bin_name);
+	} else if (pid < 0) {
+		panic("Failed to fork?\n");
+	}
+
+	int status;
+	waitpid(pid, &status, 0);
+	return pid;
+}
+
+int process_command(DebugState *dbg, int *cpid, char *line, uint64_t line_size, dol_t *outbuf) {
 	struct user_regs_struct regs;
+
+	int pid = *cpid;
 
 	if (!strcmp(line, "c")) {
 		continue_to_next(dbg, pid, false);
+	} else if (line_size > 3 && line[0] == 'r' && line[1] == ' ') {
+/*
+		free_debug_state(dbg);
+
+		int ret = kill(pid, SIGKILL);
+		if (ret == -1) {
+			panic("Process too attached to children\n");
+		}
+
+		char path[PATH_MAX + 1] = {0};
+		uint64_t path_size = line_size - 2;
+		memcpy(path, line + 2, path_size);
+
+		char *args_arr[PATH_MAX + 1] = {0};
+		int args_len = 0;
+		char *last_arg = path;
+		uint64_t i = 0;
+		for (;i < path_size; i++) {
+			if (path[i] == '\n' || path[i] == '\0') {
+				break;
+			}
+
+			if (path[i] == ' ') {
+				args_arr[args_len++] = last_arg;
+				path[i] = '\0';
+				last_arg = path + 1;
+			}
+		}
+		if (i == path_size) {
+			args_arr[args_len++] = last_arg;
+			path[i + 1] = '\0';
+		}
+
+		init_debug_state(dbg, args_arr[0]);
+		*cpid = start_debugger(args_arr[0], args_arr + 1);
+*/
+	} else if (!strcmp(line, "r")) {
+		int ret = kill(pid, SIGKILL);
+		if (ret == -1) {
+			panic("Process too attached to children\n");
+		}
+
+		reset_checks(dbg);
+
+		*cpid = start_debugger(dbg->sections.bin_name, dbg->sections.args);
+	} else if (line_size > 3 && line[0] == 'r' && line[1] == ' ') {
+		free_debug_state(dbg);
+
+		int ret = kill(pid, SIGKILL);
+		if (ret == -1) {
+			panic("Process too attached to children\n");
+		}
+
+		char path[PATH_MAX + 1] = {0};
+		uint64_t path_size = line_size - 2;
+		memcpy(path, line + 2, path_size);
+
+		char *args_arr[PATH_MAX + 1] = {0};
+		int args_len = 0;
+		char *last_arg = path;
+		uint64_t i = 0;
+		for (;i < path_size; i++) {
+			if (path[i] == '\n' || path[i] == '\0') {
+				break;
+			}
+
+			if (path[i] == ' ') {
+				args_arr[args_len++] = last_arg;
+				path[i] = '\0';
+				last_arg = path + 1;
+			}
+		}
+		if (i == path_size) {
+			args_arr[args_len++] = last_arg;
+			path[i + 1] = '\0';
+		}
+
+		*cpid = start_debugger(args_arr[0], args_arr + 1);
 	} else if (!strcmp(line, "fs")) {
 		for (uint64_t i = 0; i < dbg->block_len; i++) {
 			Block *b = &dbg->block_table[i];	
@@ -2593,15 +2745,6 @@ int process_command(DebugState *dbg, int pid, char *line, uint64_t line_size, do
 		}
 	} else if (!strcmp(line, "q")) {
 		happy_death("program closed!\n");
-	} else if (!strcmp(line, "h")) {
-		printf("bl <line> <file> -- break at line in file\n");
-		printf("w <var> -- watch variable\n");
-		printf("p <var> -- print variable\n");
-		printf("p -- print registers\n");
-		printf("s -- single step\n");
-		printf("c -- continue\n");
-		printf("b -- break at address\n");
-		printf("q -- quit\n");
 	} else {
 		printf("Command %s not recognized\n", line);
 		return 0;
@@ -2610,32 +2753,15 @@ int process_command(DebugState *dbg, int pid, char *line, uint64_t line_size, do
 	return 1;
 }
 
+
 int main(int argc, char **argv) {
 	if (argc < 2) {
 		panic("Please provide the debugger a program to debug!\n");
 	}
 
-	DebugState dbg;
-	init_debug_state(&dbg, argv[1]);
-
-	int pid = fork();
-	if (pid == 0) {
-		ptrace(PTRACE_TRACEME, 0, NULL, NULL);
-
-		// Turn off stack address randomization for more consistent debugging
-		personality(ADDR_NO_RANDOMIZE);
-		execvp(dbg.sections.bin_name, argv + 1);
-
-		panic("Failed to run program %s\n", dbg.sections.bin_name);
-	} else if (pid < 0) {
-		panic("Failed to fork?\n");
-	}
-
-	int status;
-	waitpid(pid, &status, 0);
-
-	print_block_table(dbg.block_table, dbg.block_len);
-	print_line_table(dbg.line_tables, dbg.line_tables_len);
+	DebugState dbg = {0};
+	init_debug_state(&dbg, argv[1], argv + 1);
+	int pid = start_debugger(argv[1], argv + 1);
 
 	struct sockaddr_in serv_addr = {0};
 	uint16_t port = 5000;
@@ -2683,7 +2809,14 @@ int main(int argc, char **argv) {
 				line_buffer[i] = 0;
 //				printf("RECV %lu [%.*s]\n", i - new_start, (int)(i - new_start), line_buffer + new_start);
 
-				int ret = process_command(&dbg, pid, line_buffer + new_start, i - new_start, &out);
+				int ret = process_command(&dbg, &pid, line_buffer + new_start, i - new_start, &out);
+
+				if (dbg.needs_restart) {
+					reset_checks(&dbg);
+					pid = start_debugger(dbg.sections.bin_name, dbg.sections.args);
+					dbg.needs_restart = false;
+				}
+
 				new_start = i + 1;
 
 				if (out.offset > out.length) {
