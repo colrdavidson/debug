@@ -32,13 +32,13 @@ func run_command(dbg *DebugState, cmd string) (result string) {
 	dbg.lock.Lock()
 	_, err := dbg.conn.Write([]byte(cmd))
 	if err != nil {
-		log.Fatal("Failed to send file list cmd!")
+		log.Fatal("Failed to send cmd!")
 	}
 
 	data := make([]byte, 4096)
 	size, err := dbg.conn.Read(data)
 	if err != nil {
-		log.Fatal("Failed to get file list!")
+		log.Fatal("Failed to get cmd response!")
 	}
 	dbg.lock.Unlock()
 

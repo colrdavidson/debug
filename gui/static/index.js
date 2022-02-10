@@ -23,9 +23,6 @@ async function update_ftree_file() {
 
 async function render_file_list() {
 	let ftree_display_elem = document.getElementById('ftree-display');
-	while (ftree_display_elem.firstChild) {
-		ftree_display_elem.removeChild(ftree_display_elem.firstChild);
-	}
 
 	let ftree_frag = document.createDocumentFragment();
 
@@ -48,7 +45,7 @@ async function render_file_list() {
 		ftree_frag.appendChild(fline);
 	}
 
-	ftree_display_elem.appendChild(ftree_frag);
+	attach_frag_children(ftree_display_elem, ftree_frag);	
 }
 
 async function get_file_list() {
@@ -83,15 +80,22 @@ async function cont() {
 	await get_current_position();
 }
 
+function attach_frag_children(host_elem, frag_elem) {
+	if (host_elem.firstChild) {
+		let section_parent = host_elem.parentElement;
+		let new_host_elem = host_elem.cloneNode();
+		new_host_elem.appendChild(frag_elem);
+		section_parent.replaceChild(new_host_elem, host_elem)
+	} else {
+		host_elem.appendChild(frag_elem);
+	}
+}
+
 async function get_registers() {
 	let response = await fetch('/get_registers');
 	let registers = await response.json();
 
 	let reg_display_elem = document.getElementById('register-display');
-	while (reg_display_elem.firstChild) {
-		reg_display_elem.removeChild(reg_display_elem.firstChild);
-	}
-
 	let reg_frag = document.createDocumentFragment();
 
 	let reg_header_elem = document.createElement("h3");
@@ -119,7 +123,7 @@ async function get_registers() {
 		reg_frag.appendChild(reg_line);	
 	}
 
-	reg_display_elem.appendChild(reg_frag);
+	attach_frag_children(reg_display_elem, reg_frag);
 }
 
 function render_position(position) {
@@ -134,7 +138,8 @@ async function get_current_position() {
 	let new_position = await response.json();
 
 	render_position(new_position);
-	if (current_position.line != "" && current_position.line != new_position.line) {
+
+	if (current_position.line != "" && current_position.line != new_position.line && current_position.file == files[current_file].name) {
 		let old_line_elem = document.getElementById('code-line-' + current_position.line);
 		old_line_elem.classList.remove("line-active");
 	}
@@ -164,9 +169,6 @@ async function get_file(path_blob) {
 	let file_blob = await response.json();
 
 	let file_elem = document.getElementById('file-display');
-	while (file_elem.firstChild) {
-		file_elem.removeChild(file_elem.firstChild);
-	}
 
 	let chunk = file_blob.data;
 	let file_name = path_blob.name;
@@ -176,6 +178,12 @@ async function get_file(path_blob) {
 	let file_frag = document.createDocumentFragment();
 	let line_count = 1;
 
+	let file_header_elem = document.createElement("h3");
+	let header_text = document.createTextNode("File - " + file_name);
+	file_header_elem.appendChild(header_text);
+	file_frag.appendChild(file_header_elem);
+
+	let file_display_elem = document.createElement("div");
 	for (;;) {
 		let line_elem = document.createElement("div");
 		line_elem.classList.add("code-line-wrapper");
@@ -212,23 +220,16 @@ async function get_file(path_blob) {
 			line_elem.appendChild(pre_elem);
 		}
 
-		file_frag.appendChild(line_elem);
+		file_display_elem.appendChild(line_elem);
 		start_idx = re.lastIndex;
 		line_count += 1;
 	}
 
 	let line_count_width = Math.floor(Math.log10(line_count)) + 1;
-
-	let file_display_elem = document.createElement("div");
-	file_display_elem.appendChild(file_frag);
-
-	let file_header_elem = document.createElement("h3");
-	let header_text = document.createTextNode("File - " + file_name);
-	file_header_elem.appendChild(header_text);
-
-	file_elem.appendChild(file_header_elem);
-	file_elem.appendChild(file_display_elem);
 	document.documentElement.style.setProperty('--line-count-width', line_count_width + 'ch');
+
+	file_frag.appendChild(file_display_elem);
+	attach_frag_children(file_elem, file_frag);
 }
 
 async function main() {

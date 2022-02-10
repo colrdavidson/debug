@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <time.h>
 #include <sys/wait.h>
 #include <sys/ptrace.h>
 #include <sys/user.h>
@@ -540,6 +541,14 @@ uint64_t get_regval_for_dwarf_reg(struct user_regs_struct *regs, uint8_t idx) {
 	return 0;
 }
 
+uint64_t get_time_ms() {
+    struct timespec tms;
+	clock_gettime(CLOCK_MONOTONIC, &tms);
+
+	uint64_t millis = tms.tv_sec * 1000;
+	millis += tms.tv_nsec / 1000000;
+	return millis;
+}
 
 int64_t get_leb128_i(uint8_t *buf, uint32_t *size) {
 	uint8_t *ptr = buf;
@@ -2672,7 +2681,7 @@ int main(int argc, char **argv) {
 		for (uint64_t i = line_start; i < used_bytes; i++) {
 			if (line_buffer[i] == '\n') {
 				line_buffer[i] = 0;
-				printf("RECV %lu [%.*s]\n", i - new_start, (int)(i - new_start), line_buffer + new_start);
+//				printf("RECV %lu [%.*s]\n", i - new_start, (int)(i - new_start), line_buffer + new_start);
 
 				int ret = process_command(&dbg, pid, line_buffer + new_start, i - new_start, &out);
 				new_start = i + 1;
@@ -2687,7 +2696,7 @@ int main(int argc, char **argv) {
 					packet.offset = sprintf((char *)packet.data, "no %lu %.*s", out.offset, (int)out.offset, out.data);
 				}
 
-				printf("SEND %lu [%s]\n", packet.offset, packet.data);
+//				printf("SEND %lu [%s]\n", packet.offset, packet.data);
 
 				ssize_t ret_size = send(conn_fd, packet.data, packet.offset, 0);
 				if (!ret_size) {
