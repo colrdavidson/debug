@@ -10,9 +10,9 @@ DONE:
 - Support hardware watchpoints on variables
 
 TODO:
-- Plumb watchpoints to GUI
 - Handle simple user-defined C expressions
 - Easy printing memory
 - Support for sofware watchpoints
 - Load debug info for externally loaded dynamic libraries
 - Load and print callstack via .debug_frame
+- Overhaul internal line<>address table representation
