@@ -28,6 +28,12 @@ type PositionInfo struct {
 	File    string `json:"file"`
 }
 
+type WatchInfo struct {
+	Id		 string `json:"id"`
+	Variable string `json:"variable"`
+	Value    string `json:"value"`
+}
+
 func run_command(dbg *DebugState, cmd string) (result string) {
 	dbg.lock.Lock()
 	_, err := dbg.conn.Write([]byte(cmd))
@@ -155,6 +161,32 @@ func set_breakpoint(w http.ResponseWriter, r *http.Request, dbg *DebugState) {
 	_ = run_command(dbg, cmd)
 }
 
+func set_watchpoint(w http.ResponseWriter, r *http.Request, dbg *DebugState) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	vars, ok := r.URL.Query()["var"]
+	if !ok {
+		log.Fatal("Invalid variable!")
+	}
+
+	cmd := fmt.Sprintf("w %s\n", vars[0])
+	_ = run_command(dbg, cmd)
+}
+
+func clear_watchpoint(w http.ResponseWriter, r *http.Request, dbg *DebugState) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	vars, ok := r.URL.Query()["var"]
+	if !ok {
+		log.Fatal("Invalid variable!")
+	}
+
+	cmd := fmt.Sprintf("dw %s\n", vars[0])
+	_ = run_command(dbg, cmd)
+}
+
 func clear_breakpoint(w http.ResponseWriter, r *http.Request, dbg *DebugState) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -204,6 +236,32 @@ func get_registers(w http.ResponseWriter, r *http.Request, dbg *DebugState) {
 	json.NewEncoder(w).Encode(regs)
 }
 
+func get_watchpoints(w http.ResponseWriter, r *http.Request, dbg *DebugState) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	str_data := run_command(dbg, "pw\n")
+	fmt.Printf("watchpoints: [%s]\n", str_data)
+
+	wp_lines := strings.Split(str_data, "\n")
+	wps := make([]WatchInfo, len(wp_lines) - 1)
+
+	for i, bp := range wp_lines {
+		pos_chunks := strings.Split(bp, " ")
+		if len(pos_chunks) == 0 || pos_chunks[0] == "" {
+			break
+		}
+
+		if len(pos_chunks) == 3 {
+			wps[i] = WatchInfo{Id: pos_chunks[0], Value: pos_chunks[1], Variable: pos_chunks[2]}
+		} else {
+			log.Fatal("why do I hate life?\n");
+		}
+	}
+
+	json.NewEncoder(w).Encode(wps)
+}
+
 func get_breakpoints(w http.ResponseWriter, r *http.Request, dbg *DebugState) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -223,7 +281,7 @@ func get_breakpoints(w http.ResponseWriter, r *http.Request, dbg *DebugState) {
 		if len(pos_chunks) == 3 {
 			bps[i] = PositionInfo{Address: pos_chunks[0], Line: pos_chunks[1], File: pos_chunks[2]}
 		} else if len(pos_chunks) == 1 {
-			bps[i] = PositionInfo{Address: pos_chunks[0], Line: "(None)", File: "(None)"}
+			bps[i] = PositionInfo{Address: pos_chunks[0], Line: "", File: ""}
 		} else {
 			log.Fatal("why do I hate life?\n");
 		}
@@ -305,14 +363,17 @@ func main() {
 	fs := http.FileServer(http.Dir("./static"))
 	http.HandleFunc("/get_file", get_file)
 	http.HandleFunc("/set_breakpoint", func(w http.ResponseWriter, req *http.Request) { set_breakpoint(w, req, dbg) })
+	http.HandleFunc("/set_watchpoint", func(w http.ResponseWriter, req *http.Request) { set_watchpoint(w, req, dbg) })
 	http.HandleFunc("/clear_breakpoint", func(w http.ResponseWriter, req *http.Request) { clear_breakpoint(w, req, dbg) })
+	http.HandleFunc("/clear_watchpoint", func(w http.ResponseWriter, req *http.Request) { clear_watchpoint(w, req, dbg) })
+	http.HandleFunc("/watchpoints", func(w http.ResponseWriter, req *http.Request) { get_watchpoints(w, req, dbg) })
+	http.HandleFunc("/breakpoints", func(w http.ResponseWriter, req *http.Request) { get_breakpoints(w, req, dbg) })
 	http.HandleFunc("/get_registers", func(w http.ResponseWriter, req *http.Request) { get_registers(w, req, dbg) })
 	http.HandleFunc("/single_step", func(w http.ResponseWriter, req *http.Request) { single_step(w, req, dbg) })
 	http.HandleFunc("/step_into", func(w http.ResponseWriter, req *http.Request) { step_into(w, req, dbg) })
 	http.HandleFunc("/run_line", func(w http.ResponseWriter, req *http.Request) { run_line(w, req, dbg) })
 	http.HandleFunc("/cont", func(w http.ResponseWriter, req *http.Request) { continue_program(w, req, dbg) })
 	http.HandleFunc("/get_file_list", func(w http.ResponseWriter, req *http.Request) { get_file_list(w, req, dbg) })
-	http.HandleFunc("/breakpoints", func(w http.ResponseWriter, req *http.Request) { get_breakpoints(w, req, dbg) })
 	http.HandleFunc("/current_position", func(w http.ResponseWriter, req *http.Request) { get_current_position(w, req, dbg) })
 	http.HandleFunc("/restart", func(w http.ResponseWriter, req *http.Request) { restart(w, req, dbg) })
 	http.Handle("/", fs)

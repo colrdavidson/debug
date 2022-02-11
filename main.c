@@ -218,8 +218,6 @@ typedef struct {
 } Breakpoint;
 
 typedef struct {
-	char *var_name;
-
 	uint8_t *old_data;
 	uint8_t *new_data;
 
@@ -291,6 +289,9 @@ typedef struct {
 
 	uint8_t *dynamic;
 	int dynamic_size;
+
+	uint8_t *dynstr;
+	int dynstr_size;
 
 	uint8_t *debug_info;
 	int debug_info_size;
@@ -832,11 +833,22 @@ int open_binary(char *name, char **prog_path) {
 	return -1;
 }
 
-DWResult parse_data(DWSections *sections, int data_idx, uint8_t *attr_buf, int attr_idx) {
-	uint8_t attr_name = attr_buf[attr_idx];
-	uint8_t attr_form = attr_buf[attr_idx + 1];
-	uint8_t *debug_info_ptr = sections->debug_info + data_idx;
+DWResult parse_data(DWSections *sections, int data_idx, uint8_t *attr_elem) {
+	uint64_t entry_size = 0;
+	uint32_t leb_size = 0;
+	uint64_t attr_name = get_leb128_u(attr_elem, &leb_size);
+	if (!leb_size) {
+		panic("failed to parse leb!\n");
+	}
+	entry_size += leb_size;
 
+	leb_size = 0;
+	uint64_t attr_form = get_leb128_u(attr_elem + entry_size, &leb_size);
+	if (!leb_size) {
+		panic("failed to parse leb!\n");
+	}
+
+	uint8_t *debug_info_ptr = sections->debug_info + data_idx;
 	DWResult ret = {0};
 
 	switch (attr_form) {
@@ -921,8 +933,8 @@ DWResult parse_data(DWSections *sections, int data_idx, uint8_t *attr_buf, int a
 			ret.data.val = 1;
 		} break;
 		default: {
-			printf("(0x%02x) %-18s (0x%02x) %s\n", attr_name, dwarf_attr_name_to_str(attr_name), attr_form, dwarf_attr_form_to_str(attr_form));
-			panic("Unhandled form: (0x%02x) %s!\n", attr_form, dwarf_attr_form_to_str(attr_form));
+			printf("(0x%02lx) %-18s (0x%02lx) %s\n", attr_name, dwarf_attr_name_to_str(attr_name), attr_form, dwarf_attr_form_to_str(attr_form));
+			panic("Unhandled form: (0x%02lx) %s!\n", attr_form, dwarf_attr_form_to_str(attr_form));
 		}
 	}
 
@@ -1014,6 +1026,7 @@ void load_elf_sections(DWSections *sections, char *file_path) {
 		char dbgstr_str[] = ".debug_str";
 		char dbgline_str[] = ".debug_line";
 		char dynamic_str[] = ".dynamic";
+		char dynstr_str[] = ".dynstr";
 		char strtab_str[] = ".strtab";
 
 		if (!(memcmp(section_name, dbginfo_str, sizeof(dbginfo_str)))) {
@@ -1031,6 +1044,9 @@ void load_elf_sections(DWSections *sections, char *file_path) {
 		} else if (!(memcmp(section_name, dynamic_str, sizeof(dynamic_str)))) {
 			sections->dynamic_size = sect_hdr->sh_size;
 			sections->dynamic = sections->file_buffer + sect_hdr->sh_offset;
+		} else if (!(memcmp(section_name, dynstr_str, sizeof(dynstr_str)))) {
+			sections->dynstr_size = sect_hdr->sh_size;
+			sections->dynstr = sections->file_buffer + sect_hdr->sh_offset;
 		} else if (!(memcmp(section_name, strtab_str, sizeof(strtab_str)))) {
 			sections->strtab_size = sect_hdr->sh_size;
 			sections->strtab = sections->file_buffer + sect_hdr->sh_offset;
@@ -1050,7 +1066,7 @@ void get_dynamic_libraries(DWSections *sections) {
 	for (int i = 0; i < sections->dynamic_size; i += sizeof(ELF64_Dyn)) {
 		ELF64_Dyn *dyn_entry = (ELF64_Dyn *)(sections->dynamic + i);
 		if (dyn_entry->tag == DT_NEEDED) {
-			printf("NEEDED %s\n", sections->strtab + dyn_entry->val);
+			printf("NEEDED %s\n", sections->dynstr + dyn_entry->val);
 		}
 	}
 }
@@ -1092,10 +1108,23 @@ void build_block_table(DWSections *sections, Block **ext_block_table, uint64_t *
 
 		int attr_count = 0;
 		while (i < sections->debug_abbrev_size) {
-			uint8_t attr_name = sections->debug_abbrev[i + 0];
-			uint8_t attr_form = sections->debug_abbrev[i + 1];
+			uint64_t entry_size = 0;
 
-			i += 2;
+			leb_size = 0;
+			uint64_t attr_name = get_leb128_u(sections->debug_abbrev + i, &leb_size);
+			if (!leb_size) {
+				panic("failed to parse leb!\n");
+			}
+			entry_size += leb_size;
+
+			leb_size = 0;
+			uint64_t attr_form = get_leb128_u(sections->debug_abbrev + i + entry_size, &leb_size);
+			if (!leb_size) {
+				panic("failed to parse leb!\n");
+			}
+			entry_size += leb_size;
+
+			i += entry_size;
 			if (attr_name == 0 && attr_form == 0) {
 				break;
 			}
@@ -1175,10 +1204,26 @@ void build_block_table(DWSections *sections, Block **ext_block_table, uint64_t *
 			blk->cu_idx = cur_cu_idx;
 			blk->depth = child_level;
 
-			for (int j = 0; j < (entry->attr_count * 2); j += 2) {
-				uint8_t attr_name = entry->attr_buf[j];
+			printf("current offset <0x%lx>\n", ((uint64_t)i) - 1);
 
-				DWResult ret = parse_data(sections, i, entry->attr_buf, j);
+			uint64_t entry_offset = 0;
+			for (int j = 0; j < (entry->attr_count * 2); j += 2) {
+				uint64_t entry_start = entry_offset;
+
+				uint32_t leb_size = 0;
+				uint64_t attr_name = get_leb128_u(entry->attr_buf + entry_offset, &leb_size);
+				if (!leb_size) {
+					panic("failed to parse leb!\n");
+				}
+				entry_offset += leb_size;
+
+				get_leb128_u(entry->attr_buf + entry_offset, &leb_size);
+				if (!leb_size) {
+					panic("failed to parse leb!\n");
+				}
+				entry_offset += leb_size;
+
+				DWResult ret = parse_data(sections, i, entry->attr_buf + entry_start);
 
 				switch (attr_name) {
 					case DW_AT_data_member_location: {
@@ -2651,6 +2696,23 @@ int process_command(DebugState *dbg, int *cpid, char *line, uint64_t line_size, 
 		} else {
 			outbuf->offset += sprintf((char *)outbuf->data + outbuf->offset, "0x%llx %lu %s\n", regs.rip, fl.line, fl.file);
 		}
+	} else if (!strcmp(line, "pw")) {
+		for (uint64_t i = 0; i < dbg->watch_len; i++) {
+			Watchpoint *wp = &dbg->watch_table[i];
+			Block *var = &dbg->block_table[wp->var_idx];
+
+			if (wp->watch_width <= 8) {
+				uint64_t data = 0;
+				memcpy(&data, wp->new_data, wp->watch_width);
+				outbuf->offset += sprintf((char *)outbuf->data + outbuf->offset, "%lu %lu %s\n", i, data, var->name);
+			} else {
+				outbuf->offset += sprintf((char *)outbuf->data + outbuf->offset, "%lu 0x%lx %s\n", i, (uint64_t)wp->new_data, var->name);
+			}
+
+			if (outbuf->offset > outbuf->length) {
+				panic("too many watchpoints!\n");
+			}
+		}
 	} else if (line_size > 3 && line[0] == 'w' && line[1] == ' ') {
 		char *watch_name = line + 2;
 		add_watchpoint(dbg, pid, watch_name);
@@ -2762,6 +2824,8 @@ int main(int argc, char **argv) {
 	DebugState dbg = {0};
 	init_debug_state(&dbg, argv[1], argv + 1);
 	int pid = start_debugger(argv[1], argv + 1);
+
+	print_block_table(dbg.block_table, dbg.block_len);
 
 	struct sockaddr_in serv_addr = {0};
 	uint16_t port = 5000;

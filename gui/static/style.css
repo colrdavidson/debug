@@ -191,6 +191,18 @@ nav > h2 {
 	width: 4ch;
 }
 
+.watch-line {
+	display: flex;
+	flex-direction: row;
+	align-items: center;
+	font-family: 'Fira Code', monospace;
+}
+.watch-line > p {
+	font-weight: bold;
+	margin-right: 0.25rem;
+	font-size: 1.125rem;
+}
+
 section {
 	background-color: var(--bg-color2);
 	padding: 1em;

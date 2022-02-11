@@ -1,6 +1,8 @@
 let files = [];
 let breakpoints = [];
+let watchpoints = [];
 let registers = [];
+
 let current_file = 0;
 let current_position = {address: "", line: "", file: ""};
 let last_position    = {address: "", line: "", file: ""};
@@ -14,6 +16,14 @@ function attach_frag_children(host_elem, frag_elem) {
 	} else {
 		host_elem.appendChild(frag_elem);
 	}
+}
+
+function generate_tagged_text(tag_type, text) {
+	let tag_elem = document.createElement(tag_type);
+	let text_elem = document.createTextNode(text);
+	tag_elem.appendChild(text_elem);
+
+	return tag_elem;
 }
 
 async function toggle_breakpoint(file_name, line_num) {
@@ -51,6 +61,8 @@ async function single_step() {
 	await fetch('/single_step');
 	await get_registers();
 	await get_current_position();
+	await get_breakpoints();
+	await get_watchpoints();
 
 	render_page();
 }
@@ -59,6 +71,8 @@ async function step_into() {
 	await fetch('/step_into');
 	await get_registers();
 	await get_current_position();
+	await get_breakpoints();
+	await get_watchpoints();
 
 	render_page();
 }
@@ -67,6 +81,8 @@ async function run_line() {
 	await fetch('/run_line');
 	await get_registers();
 	await get_current_position();
+	await get_breakpoints();
+	await get_watchpoints();
 
 	render_page();
 }
@@ -75,6 +91,8 @@ async function cont() {
 	await fetch('/cont');
 	await get_registers();
 	await get_current_position();
+	await get_breakpoints();
+	await get_watchpoints();
 
 	render_page();
 }
@@ -87,6 +105,7 @@ async function restart() {
 	await get_registers();
 	await get_current_position();
 	await get_breakpoints();
+	await get_watchpoints();
 
 	render_page();
 }
@@ -109,14 +128,16 @@ async function get_breakpoints() {
 	breakpoints = await response.json();	
 }
 
+async function get_watchpoints() {
+	let response = await fetch('/watchpoints');
+	watchpoints = await response.json();	
+}
+
 function render_registers() {
 	let reg_display_elem = document.getElementById('register-display');
 	let reg_frag = document.createDocumentFragment();
 
-	let reg_header_elem = document.createElement("h3");
-	let reg_header_text = document.createTextNode("Registers");
-	reg_header_elem.appendChild(reg_header_text);
-	reg_frag.appendChild(reg_header_elem);
+	reg_frag.appendChild(generate_tagged_text("h3", "Registers"));
 
 	for (let i = 0; i < registers.length; i++) {
 		let register = registers[i];
@@ -124,17 +145,8 @@ function render_registers() {
 		let reg_line = document.createElement("div");
 		reg_line.classList.add("register-line");
 		
-		let reg_name = document.createTextNode(register.name + ":");
-		let reg_name_elem = document.createElement("p");
-		reg_name_elem.appendChild(reg_name);
-
-		let reg_val = document.createTextNode(register.value);
-		let reg_value_elem = document.createElement("span");
-		reg_value_elem.appendChild(reg_val);
-
-		reg_line.appendChild(reg_name_elem);
-		reg_line.appendChild(reg_value_elem);
-
+		reg_line.appendChild(generate_tagged_text("p", register.name + ":"));
+		reg_line.appendChild(generate_tagged_text("span", register.value));
 		reg_frag.appendChild(reg_line);	
 	}
 
@@ -145,11 +157,9 @@ function render_file_list() {
 	let ftree_display_elem = document.getElementById('ftree-display');
 
 	let ftree_frag = document.createDocumentFragment();
-
 	for (let i = 0; i < files.length; i++) {
 		let file = files[i];
-		let fline = document.createElement("p");
-		let fname = document.createTextNode(file.name);
+		let fline = generate_tagged_text("p", file.name);
 
 		if (i == current_file) {
 			fline.classList.add("current-file");
@@ -161,7 +171,6 @@ function render_file_list() {
 			});
 		}
 
-		fline.appendChild(fname);
 		ftree_frag.appendChild(fline);
 	}
 
@@ -205,10 +214,7 @@ function render_file(file) {
 	let file_frag = document.createDocumentFragment();
 	let line_count = 1;
 
-	let file_header_elem = document.createElement("h3");
-	let header_text = document.createTextNode("File - " + file_name);
-	file_header_elem.appendChild(header_text);
-	file_frag.appendChild(file_header_elem);
+	file_frag.appendChild(generate_tagged_text("h3", "File - " + file_name));
 
 	let file_display_elem = document.createElement("div");
 	for (;;) {
@@ -259,6 +265,38 @@ function render_file(file) {
 	attach_frag_children(file_elem, file_frag);
 }
 
+function render_watchpoints() {
+	let watchpoint_elem = document.getElementById('watchpoint-display');
+	let watch_frag = document.createDocumentFragment();
+
+	watch_frag.appendChild(generate_tagged_text("h3", "Watchpoints"));
+	let input_elem = document.createElement("input");
+	input_elem.setAttribute('placeholder', 'enter watchpoint here...');
+	input_elem.addEventListener("keyup", (ev) => {
+		if (ev.keyCode == 13) {
+			event.preventDefault();
+
+			fetch('/set_watchpoint?var=' + ev.target.value)
+			.then(get_watchpoints)
+			.then(render_watchpoints);
+		}
+	});
+	watch_frag.appendChild(input_elem);
+
+	for (let i = 0; i < watchpoints.length; i++) {
+		let wp = watchpoints[i];
+
+		let watch_line = document.createElement("div");
+		watch_line.classList.add("watch-line");
+
+		watch_line.appendChild(generate_tagged_text("p", wp.variable + ":"));
+		watch_line.appendChild(generate_tagged_text("span", wp.value));
+
+		watch_frag.appendChild(watch_line);
+	}
+
+	attach_frag_children(watchpoint_elem, watch_frag);
+}
 
 function render_page() {
 	render_registers();
@@ -274,6 +312,7 @@ function render_page() {
 	render_file(files[current_file]);
 	render_breakpoints();
 	render_position();
+	render_watchpoints();
 }
 
 async function main() {
@@ -281,6 +320,7 @@ async function main() {
 	await get_registers();
 	await get_current_position();
 	await get_breakpoints();
+	await get_watchpoints();
 
 	render_page();
 }
