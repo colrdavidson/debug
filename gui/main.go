@@ -110,8 +110,9 @@ func get_file_list(w http.ResponseWriter, r *http.Request, dbg *DebugState) {
 	str_data := run_command(dbg, "fs\n")
 
 	type FilePath struct {
-		Name string `json:"name"`
 		Path string `json:"path"`
+		Dir  string `json:"dir"`
+		Name string `json:"name"`
 	}
 
 	type Data struct {
@@ -126,12 +127,13 @@ func get_file_list(w http.ResponseWriter, r *http.Request, dbg *DebugState) {
 		}
 
 		pdata := strings.Split(path, " ")
-		if len(pdata) != 2 {
+		if len(pdata) != 3 {
 			break
 		}
 
 		paths[i].Path = pdata[0]
-		paths[i].Name = pdata[1]
+		paths[i].Dir  = pdata[1]
+		paths[i].Name = pdata[2]
 	}
 
 	dt := &Data{Paths: paths}

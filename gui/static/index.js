@@ -3,6 +3,7 @@ let breakpoints = [];
 let watchpoints = [];
 let registers = [];
 
+let should_render_file = true;
 let current_file = 0;
 let current_position = {address: "", line: "", file: ""};
 let last_position    = {address: "", line: "", file: ""};
@@ -51,7 +52,7 @@ async function get_file_list() {
 }
 
 async function get_file(path_blob) {
-	let file_path = path_blob.path + "/" + path_blob.name;
+	let file_path = path_blob.path + "/" + path_blob.dir + "/" + path_blob.name;
 	let response = await fetch('/get_file?file=' + file_path);
 	let file_blob = await response.json();
 	return file_blob;
@@ -64,7 +65,7 @@ async function single_step() {
 	await get_breakpoints();
 	await get_watchpoints();
 
-	render_page();
+	render_page(true);
 }
 
 async function step_into() {
@@ -74,7 +75,7 @@ async function step_into() {
 	await get_breakpoints();
 	await get_watchpoints();
 
-	render_page();
+	render_page(true);
 }
 
 async function run_line() {
@@ -84,7 +85,7 @@ async function run_line() {
 	await get_breakpoints();
 	await get_watchpoints();
 
-	render_page();
+	render_page(true);
 }
 
 async function cont() {
@@ -94,7 +95,7 @@ async function cont() {
 	await get_breakpoints();
 	await get_watchpoints();
 
-	render_page();
+	render_page(true);
 }
 
 async function restart() {
@@ -107,7 +108,7 @@ async function restart() {
 	await get_breakpoints();
 	await get_watchpoints();
 
-	render_page();
+	render_page(true);
 }
 
 async function get_registers() {
@@ -166,8 +167,9 @@ function render_file_list() {
 		} else {
 			let cur_idx = i.valueOf();
 			fline.addEventListener("click", () => { 
-				current_file = cur_idx;
-				render_page();
+				current_file = cur_idx;		
+				should_render_file = true;
+				render_page(false);
 			});
 		}
 
@@ -203,8 +205,16 @@ function render_position() {
 	}
 }
 
-function render_file(file) {
+function render_file() {
+	let file = files[current_file];
+
 	let file_elem = document.getElementById('file-display');
+
+	if (!should_render_file) {
+		return;
+	}
+
+	should_render_file = false;
 
 	let chunk = file.data.data;
 	let file_name = file.name;
@@ -298,18 +308,20 @@ function render_watchpoints() {
 	attach_frag_children(watchpoint_elem, watch_frag);
 }
 
-function render_page() {
+function render_page(cursor_changed) {
 	render_registers();
 
-	for (let i = 0; i < files.length; i++) {
-		if (files[i].name == current_position.file) {
-			current_file = i;
-			break;
+	if (cursor_changed) {
+		for (let i = 0; i < files.length; i++) {
+			if (files[i].name == current_position.file) {
+				current_file = i;
+				break;
+			}
 		}
 	}
 
 	render_file_list();
-	render_file(files[current_file]);
+	render_file();
 	render_breakpoints();
 	render_position();
 	render_watchpoints();
@@ -322,5 +334,5 @@ async function main() {
 	await get_breakpoints();
 	await get_watchpoints();
 
-	render_page();
+	render_page(true);
 }

@@ -1,4 +1,4 @@
-for dir in $(find . -mindepth 1 -type d)
+for dir in $(find . -mindepth 1 -maxdepth 1 -type d)
 do
 	cd "$dir"
 	echo "Building $dir"

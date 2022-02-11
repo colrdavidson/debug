@@ -50,7 +50,7 @@ nav > h2 {
 
 .content {
 	display: grid;
-	grid-template-columns: 6em 1fr 15em;
+	grid-template-columns: 15em 1fr 15em;
 	grid-template-rows: 3em 1fr 1fr 1fr 1fr;
 	grid-gap: 10px;
 	height: calc(100vh - 2.5em);

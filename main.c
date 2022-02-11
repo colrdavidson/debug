@@ -24,6 +24,12 @@
  * - https://wiki.osdev.org/DWARF
  */
 
+
+// TOGGLES
+#define LOCAL 1 // Shuts off network stack, runs local command processing only
+
+
+// MACROS
 #define panic(...) do { dprintf(2, __VA_ARGS__); exit(1); } while (0)
 #define assert(x, ...) do { if ((x)) { dprintf(2, __VA_ARGS__); exit(1); } } while (0)
 #define happy_death(...) do { dprintf(2, __VA_ARGS__); exit(0); } while (0)
@@ -42,6 +48,7 @@
 #define ABBREV_MAX 1024
 #define OUTBUF_MAX 4096
 
+// DEFINES
 #define DT_NULL 0
 #define DT_NEEDED 1
 #define DT_STRTAB 5
@@ -164,6 +171,8 @@ typedef struct {
 
 	uint8_t *loc_expr;
 	int loc_expr_len;
+	uint8_t *loc_list;
+	uint64_t const_val;
 
 	uint8_t *frame_base_expr;
 	int frame_base_expr_len;
@@ -304,6 +313,9 @@ typedef struct {
 
 	uint8_t *debug_abbrev;
 	int debug_abbrev_size;
+
+	uint8_t *debug_loc;
+	int debug_loc_size;
 } DWSections;
 
 typedef struct {
@@ -358,16 +370,29 @@ typedef struct {
 } DebugState;
 
 #define DWARF_FORM \
-	X(DW_FORM_addr, 0x01) \
-	X(DW_FORM_data2, 0x05) \
-	X(DW_FORM_data4, 0x06) \
+	X(DW_FORM_addr,   0x01) \
+	X(DW_FORM_block2, 0x03) \
+	X(DW_FORM_block4, 0x04) \
+	X(DW_FORM_data2,  0x05) \
+	X(DW_FORM_data4,  0x06) \
+	X(DW_FORM_data8,  0x07) \
 	X(DW_FORM_string, 0x08) \
-	X(DW_FORM_data1, 0x0b) \
-	X(DW_FORM_strp, 0x0e) \
-	X(DW_FORM_udata, 0x0f) \
-	X(DW_FORM_ref4, 0x13) \
+	X(DW_FORM_block,  0x09) \
+	X(DW_FORM_block1, 0x0a) \
+	X(DW_FORM_data1,  0x0b) \
+	X(DW_FORM_flag,   0x0c) \
+	X(DW_FORM_sdata,  0x0d) \
+	X(DW_FORM_strp,   0x0e) \
+	X(DW_FORM_udata,  0x0f) \
+	X(DW_FORM_ref_addr,  0x10) \
+	X(DW_FORM_ref1,   0x11) \
+	X(DW_FORM_ref2,   0x12) \
+	X(DW_FORM_ref4,   0x13) \
+	X(DW_FORM_ref8,   0x14) \
+	X(DW_FORM_ref_udata,  0x15) \
+	X(DW_FORM_indirect,   0x16) \
 	X(DW_FORM_sec_offset, 0x17) \
-	X(DW_FORM_exprloc, 0x18) \
+	X(DW_FORM_exprloc,    0x18) \
 	X(DW_FORM_flag_present, 0x19)
 
 #define DWARF_TAG \
@@ -735,22 +760,29 @@ void print_abbrev_table(AbbrevUnit *entries, int entry_count) {
 
 void print_line_table(CULineTable *line_tables, uint64_t line_tables_len) {
 	for (uint64_t i = 0; i < line_tables_len; i++) {
-		CULineTable line_table = line_tables[i];
+		CULineTable *line_table = &line_tables[i];
 		printf("CU Line Table %lu\n", i + 1);
 		printf("Files:\n");
-		for (int j = 0; j < line_table.file_count; j++) {
-			uint8_t dir_idx = line_table.dir_idx[j];
-			char *dirname = line_table.dirs[dir_idx];
-			if (!line_table.filenames[j]) {
+		for (int j = 0; j < line_table->file_count; j++) {
+			uint8_t dir_idx = line_table->dir_idx[j];
+			char *dirname = line_table->dirs[dir_idx];
+			if (!line_table->filenames[j]) {
 				continue;
 			}
 
-			printf("- %s | %s\n", dirname, line_table.filenames[j]);
+			printf("[%d] - %s | %s\n", j, dirname, line_table->filenames[j]);
 		}
-		printf("opcode base: %d\n", line_table.opcode_base);
-		printf("line base: %d\n", line_table.line_base);
-		printf("line range: %d\n", line_table.line_range);
-		printf("default is_stmt: %d\n", line_table.default_is_stmt);
+/*
+		for (int j = 0; j < line_table->line_count; j++) {
+			LineMachine *line = &line_table->lines[j];
+			printf("line %u | address 0x%lx | file %s\n", 
+				line->line_num, line->address, line_table->filenames[line->file_idx]);
+		}
+*/
+		printf("opcode base: %d\n", line_table->opcode_base);
+		printf("line base: %d\n", line_table->line_base);
+		printf("line range: %d\n", line_table->line_range);
+		printf("default is_stmt: %d\n", line_table->default_is_stmt);
 		printf("\n");
 	}
 }
@@ -897,6 +929,14 @@ DWResult parse_data(DWSections *sections, int data_idx, uint8_t *attr_elem) {
 			ret.data.val = data;
 			ret.skip = sizeof(uint32_t);
 		} break;
+		case DW_FORM_sdata: {
+			uint32_t leb_size = 0;
+			uint64_t sdata = get_leb128_i(debug_info_ptr, &leb_size);
+
+			ret.type = DWIVal;
+			ret.data.val = sdata;
+			ret.skip = leb_size;
+		} break;
 		case DW_FORM_udata: {
 			uint32_t leb_size = 0;
 			uint64_t udata = get_leb128_u(debug_info_ptr, &leb_size);
@@ -914,7 +954,6 @@ DWResult parse_data(DWSections *sections, int data_idx, uint8_t *attr_elem) {
 		} break;
 		case DW_FORM_sec_offset: {
 			uint32_t sect_off = *((uint32_t *)debug_info_ptr);
-
 			ret.type = DWUVal;
 			ret.data.val = sect_off;
 			ret.skip = sizeof(uint32_t);
@@ -1025,6 +1064,7 @@ void load_elf_sections(DWSections *sections, char *file_path) {
 		char dbgabbrev_str[] = ".debug_abbrev";
 		char dbgstr_str[] = ".debug_str";
 		char dbgline_str[] = ".debug_line";
+		char dbgloc_str[] = ".debug_loc";
 		char dynamic_str[] = ".dynamic";
 		char dynstr_str[] = ".dynstr";
 		char strtab_str[] = ".strtab";
@@ -1050,6 +1090,9 @@ void load_elf_sections(DWSections *sections, char *file_path) {
 		} else if (!(memcmp(section_name, strtab_str, sizeof(strtab_str)))) {
 			sections->strtab_size = sect_hdr->sh_size;
 			sections->strtab = sections->file_buffer + sect_hdr->sh_offset;
+		} else if (!(memcmp(section_name, dbgloc_str, sizeof(dbgloc_str)))) {
+			sections->debug_loc_size = sect_hdr->sh_size;
+			sections->debug_loc = sections->file_buffer + sect_hdr->sh_offset;
 		}
 	}
 
@@ -1090,7 +1133,7 @@ void build_block_table(DWSections *sections, Block **ext_block_table, uint64_t *
 		}
 
 		if (abbrev_len + 1 > ABBREV_MAX) {
-			panic("TODO This should probably be dynamic!\n");
+			panic("TODO 1 This should probably be dynamic!\n");
 		}
 
 		AbbrevUnit *entry = &abbrev_entries[abbrev_len++];
@@ -1179,7 +1222,14 @@ void build_block_table(DWSections *sections, Block **ext_block_table, uint64_t *
 			}
 
 			if (*blk_len + 1 > *block_max) {
-				panic("TODO This should probably be dynamic!\n");
+				uint64_t old_max = *block_max;
+				uint64_t old_size = old_max * sizeof(Block);
+
+				*ext_block_table = realloc(*ext_block_table, old_size * 2);
+				block_table = *ext_block_table;
+
+				memset(block_table + old_max, 0, old_size);
+				*block_max = *block_max * 2;
 			}
 
 			AbbrevUnit *entry = NULL;
@@ -1204,8 +1254,6 @@ void build_block_table(DWSections *sections, Block **ext_block_table, uint64_t *
 			blk->cu_idx = cur_cu_idx;
 			blk->depth = child_level;
 
-			printf("current offset <0x%lx>\n", ((uint64_t)i) - 1);
-
 			uint64_t entry_offset = 0;
 			for (int j = 0; j < (entry->attr_count * 2); j += 2) {
 				uint64_t entry_start = entry_offset;
@@ -1217,7 +1265,7 @@ void build_block_table(DWSections *sections, Block **ext_block_table, uint64_t *
 				}
 				entry_offset += leb_size;
 
-				get_leb128_u(entry->attr_buf + entry_offset, &leb_size);
+				uint64_t attr_form = get_leb128_u(entry->attr_buf + entry_offset, &leb_size);
 				if (!leb_size) {
 					panic("failed to parse leb!\n");
 				}
@@ -1256,12 +1304,14 @@ void build_block_table(DWSections *sections, Block **ext_block_table, uint64_t *
 						}
 					} break;
 					case DW_AT_location: {
-						if (ret.type != DWExpr) {
+						if (ret.type == DWExpr) {
+							blk->loc_expr = ret.data.expr;
+							blk->loc_expr_len = ret.size;
+						} else if (attr_form == DW_FORM_sec_offset) {
+							blk->loc_list = sections->debug_loc + ret.data.val;
+						} else {
 							panic("Unable to handle static locations!\n");
 						}
-
-						blk->loc_expr = ret.data.expr;
-						blk->loc_expr_len = ret.size;
 					} break;
 					case DW_AT_byte_size: {
 						blk->type_width = ret.data.val;
@@ -1271,9 +1321,10 @@ void build_block_table(DWSections *sections, Block **ext_block_table, uint64_t *
 					} break;
 					case DW_AT_comp_dir: {
 						blk->comp_dir = ret.data.str;
-					}
-					default: { 
-					}
+					} break;
+					case DW_AT_const_value: {
+					} break;
+					default: { }
 				}
 
 				i += ret.skip;
@@ -2283,7 +2334,7 @@ void add_watchpoint(DebugState *dbg, int pid, char *var_name) {
 		}
 		if (wp->break_idx == (uint64_t)~0) {
 			if (dbg->break_len + 1 > dbg->break_max) {
-				panic("TODO This should probably be dynamic!\n");
+				panic("TODO 3 This should probably be dynamic!\n");
 			}
 
 			Breakpoint *br = &dbg->break_table[dbg->break_len];
@@ -2663,11 +2714,35 @@ int process_command(DebugState *dbg, int *cpid, char *line, uint64_t line_size, 
 
 		*cpid = start_debugger(args_arr[0], args_arr + 1);
 	} else if (!strcmp(line, "fs")) {
+		uint64_t cu_count = 0;
 		for (uint64_t i = 0; i < dbg->block_len; i++) {
 			Block *b = &dbg->block_table[i];	
-
 			if (b->type == DW_TAG_compile_unit) {
-				outbuf->offset += sprintf((char *)outbuf->data + outbuf->offset, "%s %s\n", b->comp_dir, b->name);
+				printf("looking for files for %s\n", b->name);
+
+				CULineTable *line_table = &dbg->line_tables[cu_count++];
+				char *dir  = NULL;
+				char *name = NULL;
+
+				char tmp_path[PATH_MAX + 1] = {0};
+				for (int j = 0; j < line_table->file_count; j++) {
+					uint8_t dir_idx = line_table->dir_idx[j];
+					char *dirname = line_table->dirs[dir_idx];
+					if (!line_table->filenames[j]) {
+						continue;
+					}
+
+					printf("TESTING %s | %s == %s | %s\n", dirname, line_table->filenames[j], b->comp_dir, b->name);
+					sprintf(tmp_path, "%s/%s", dirname, line_table->filenames[j]);	
+					if (!strcmp(tmp_path, b->name)) {
+						printf("FOUND %s/%s == %s\n", dirname, line_table->filenames[j], b->name);
+						dir = dirname;
+						name = line_table->filenames[j];
+						break;
+					}
+				}
+
+				outbuf->offset += sprintf((char *)outbuf->data + outbuf->offset, "%s %s %s\n", b->comp_dir, dir, name);
 				if (outbuf->offset > outbuf->length) {
 					panic("too many file paths!\n");
 				}
@@ -2815,7 +2890,49 @@ int process_command(DebugState *dbg, int *cpid, char *line, uint64_t line_size, 
 	return 1;
 }
 
+#ifdef LOCAL
+int main(int argc, char **argv) {
+	if (argc < 2) {
+		panic("Please provide the debugger a program to debug!\n");
+	}
+	
+	//print_block_table(dbg.block_table, dbg.block_len);
+	//print_line_table(dbg.line_tables, dbg.line_tables_len);
 
+	DebugState dbg = {0};
+	init_debug_state(&dbg, argv[1], argv + 1);
+	int pid = start_debugger(argv[1], argv + 1);
+
+	char *cmds[] = { "fs" };
+	uint64_t num_cmds = sizeof(cmds) / sizeof(*cmds);
+
+	for (uint64_t i = 0; i < num_cmds; i++) {
+		uint8_t outbuf[OUTBUF_MAX] = {0};
+		dol_t out = { .data = outbuf, .offset = 0, .length = OUTBUF_MAX };
+		uint8_t packetbuf[OUTBUF_MAX + 5] = {0};
+		dol_t packet = { .data = packetbuf, .offset = 0, .length = OUTBUF_MAX + 5 };
+
+		uint64_t cmd_size = strlen(cmds[i]);
+		printf("<%lu> RECV: [%.*s]\n", i, (int)cmd_size, cmds[i]);
+
+		int ret = process_command(&dbg, &pid, cmds[i], cmd_size, &out);
+
+		if (dbg.needs_restart) {
+			reset_checks(&dbg);
+			pid = start_debugger(dbg.sections.bin_name, dbg.sections.args);
+			dbg.needs_restart = false;
+		}
+
+		if (ret) {
+			packet.offset = sprintf((char *)packet.data, "ok %lu %.*s", out.offset, (int)out.offset, out.data);
+		} else {
+			packet.offset = sprintf((char *)packet.data, "no %lu %.*s", out.offset, (int)out.offset, out.data);
+		}
+
+		printf("<%lu> SEND: [%.*s]\n", i, (int)packet.offset, packet.data);
+	}
+}
+#elif
 int main(int argc, char **argv) {
 	if (argc < 2) {
 		panic("Please provide the debugger a program to debug!\n");
@@ -2825,7 +2942,8 @@ int main(int argc, char **argv) {
 	init_debug_state(&dbg, argv[1], argv + 1);
 	int pid = start_debugger(argv[1], argv + 1);
 
-	print_block_table(dbg.block_table, dbg.block_len);
+	//print_block_table(dbg.block_table, dbg.block_len);
+	//print_line_table(dbg.line_tables, dbg.line_tables_len);
 
 	struct sockaddr_in serv_addr = {0};
 	uint16_t port = 5000;
@@ -2843,6 +2961,7 @@ int main(int argc, char **argv) {
 	listen(listen_fd, 1);
 
 	int conn_fd = accept(listen_fd, (struct sockaddr *)NULL, NULL);
+
 
 	uint8_t outbuf[OUTBUF_MAX] = {0};
 	dol_t out = { .data = outbuf, .offset = 0, .length = OUTBUF_MAX };
@@ -2911,5 +3030,7 @@ int main(int argc, char **argv) {
 
 		memmove(line_buffer, line_buffer + line_start, new_start - line_start);
 		used_bytes -= (new_start - line_start);
+
 	}
 }
+#endif
