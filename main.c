@@ -24,11 +24,6 @@
  * - https://wiki.osdev.org/DWARF
  */
 
-
-// TOGGLES
-#define LOCAL 1 // Shuts off network stack, runs local command processing only
-
-
 // MACROS
 #define panic(...) do { dprintf(2, __VA_ARGS__); exit(1); } while (0)
 #define assert(x, ...) do { if ((x)) { dprintf(2, __VA_ARGS__); exit(1); } } while (0)
@@ -2932,7 +2927,7 @@ int main(int argc, char **argv) {
 		printf("<%lu> SEND: [%.*s]\n", i, (int)packet.offset, packet.data);
 	}
 }
-#elif
+#else
 int main(int argc, char **argv) {
 	if (argc < 2) {
 		panic("Please provide the debugger a program to debug!\n");
