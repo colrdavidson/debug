@@ -2729,15 +2729,15 @@ int process_command(DebugState *dbg, int *cpid, char *line, uint64_t line_size, 
 
 					printf("TESTING %s | %s == %s | %s\n", dirname, line_table->filenames[j], b->comp_dir, b->name);
 					sprintf(tmp_path, "%s/%s", dirname, line_table->filenames[j]);	
-					if (!strcmp(tmp_path, b->name)) {
-						printf("FOUND %s/%s == %s\n", dirname, line_table->filenames[j], b->name);
-						dir = dirname;
-						name = line_table->filenames[j];
+					if (!strcmp(line_table->filenames[j], b->name)) {
+						printf("FOUND %s | %s == %s\n", dirname, line_table->filenames[j], b->name);
+						dir = b->comp_dir;
+						name = b->name;
 						break;
 					}
 				}
 
-				outbuf->offset += sprintf((char *)outbuf->data + outbuf->offset, "%s %s %s\n", b->comp_dir, dir, name);
+				outbuf->offset += sprintf((char *)outbuf->data + outbuf->offset, "%s %s %s\n", "", dir, name);
 				if (outbuf->offset > outbuf->length) {
 					panic("too many file paths!\n");
 				}
